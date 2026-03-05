@@ -1,0 +1,1505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cashflow Stacking — Calculator & Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://apis.google.com/js/api.js" async defer></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Bricolage Grotesque',sans-serif;background:#020617;color:#e2e8f0;min-height:100vh}
+  :root{--d:'Bricolage Grotesque',sans-serif;--m:'DM Mono',monospace}
+  ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:#0f172a}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+  .tb:hover{background:#0c1525!important}
+  @keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}.fi{animation:fi .3s ease-out both}
+  @keyframes glow{0%,100%{box-shadow:0 0 8px rgba(34,197,94,.3)}50%{box-shadow:0 0 18px rgba(34,197,94,.1)}}
+  input[type=number]::-webkit-inner-spin-button{opacity:1}
+  #root{min-height:100vh}
+  #loading{display:flex;align-items:center;justify-content:center;min-height:100vh;color:#475569;font-family:monospace}
+</style>
+</head>
+<body>
+<div id="root"><div id="loading">Loading...</div></div>
+
+<script>
+// ═══ CONFIGURATION — UPDATE THESE TWO VALUES ═══
+const SHEETS_CONFIG = {
+  CLIENT_ID: '481571770380-b90bpohn8atrqsls9jso7ah5lsn5pclm.apps.googleusercontent.com',
+  SHEET_ID: '1SnEtbXrEOr8_BMaiL_szUit5AKwkkCTErkJdB78b0Uc',
+  SCOPES: 'https://www.googleapis.com/auth/spreadsheets',
+  DISCOVERY_DOC: 'https://sheets.googleapis.com/$discovery/rest?version=v4',
+};
+</script>
+
+<script type="text/babel" data-type="module">
+
+// ═══════════════════════════════════════════════
+// GOOGLE SHEETS STORAGE LAYER  
+// ═══════════════════════════════════════════════
+
+const TABS = { SETTINGS: 'Settings', FLIPS: 'Flips', ACTUALS: 'Actuals' };
+let _gapiReady = false, _tokenClient = null, _signedIn = false;
+let _onAuthChange = null;
+
+async function initGoogleApi(onAuthChange) {
+  _onAuthChange = onAuthChange;
+  return new Promise((resolve) => {
+    gapi.load('client', async () => {
+      await gapi.client.init({ discoveryDocs: [SHEETS_CONFIG.DISCOVERY_DOC] });
+      _gapiReady = true;
+      _tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: SHEETS_CONFIG.CLIENT_ID,
+        scope: SHEETS_CONFIG.SCOPES,
+        callback: (resp) => {
+          if (!resp.error) { _signedIn = true; if (_onAuthChange) _onAuthChange(true); }
+        },
+      });
+      // Check if already have token
+      if (gapi.client.getToken()) { _signedIn = true; }
+      resolve();
+    });
+  });
+}
+
+function doSignIn() {
+  if (!_tokenClient) return;
+  _tokenClient.requestAccessToken({ prompt: gapi.client.getToken() ? '' : 'consent' });
+}
+
+function doSignOut() {
+  const token = gapi.client.getToken();
+  if (token) { google.accounts.oauth2.revoke(token.access_token); gapi.client.setToken(''); }
+  _signedIn = false;
+  if (_onAuthChange) _onAuthChange(false);
+}
+
+function isGoogleSignedIn() { return _signedIn && gapi.client && gapi.client.getToken() !== null; }
+
+async function ensureTabs() {
+  try {
+    const resp = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: SHEETS_CONFIG.SHEET_ID });
+    const existing = resp.result.sheets.map(s => s.properties.title);
+    const reqs = [];
+    for (const tab of Object.values(TABS)) {
+      if (!existing.includes(tab)) reqs.push({ addSheet: { properties: { title: tab } } });
+    }
+    if (reqs.length > 0) {
+      await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, resource: { requests: reqs } });
+    }
+  } catch(e) { console.error('ensureTabs error:', e); }
+}
+
+async function sheetSaveSettings(settings) {
+  const rows = Object.entries(settings).map(([k, v]) => [k, JSON.stringify(v)]);
+  await gapi.client.sheets.spreadsheets.values.clear({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.SETTINGS+'!A:B' });
+  if (rows.length > 0) {
+    await gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.SETTINGS+'!A1',
+      valueInputOption: 'RAW', resource: { values: rows },
+    });
+  }
+}
+
+async function sheetLoadSettings() {
+  try {
+    const resp = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.SETTINGS+'!A:B' });
+    const rows = resp.result.values || [];
+    const s = {};
+    for (const [k, v] of rows) { try { s[k] = JSON.parse(v); } catch { s[k] = v; } }
+    return s;
+  } catch { return {}; }
+}
+
+async function sheetSaveFlips(flips) {
+  const header = ['id','name','amount','yield','startDate','durationYears','monthlyPmt','indexFund','actualCF'];
+  const rows = [header, ...flips.map(f => [
+    f.id, f.name, f.amount, f.yield, f.startDate, f.durationYears,
+    f.monthlyPmt, f.indexFund?'true':'false', JSON.stringify(f.actualCF||{}),
+  ])];
+  await gapi.client.sheets.spreadsheets.values.clear({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.FLIPS+'!A:I' });
+  await gapi.client.sheets.spreadsheets.values.update({
+    spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.FLIPS+'!A1',
+    valueInputOption: 'RAW', resource: { values: rows },
+  });
+}
+
+async function sheetLoadFlips() {
+  try {
+    const resp = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.FLIPS+'!A:I' });
+    const rows = resp.result.values || [];
+    if (rows.length < 2) return [];
+    const h = rows[0];
+    return rows.slice(1).map(row => {
+      const o = {};
+      h.forEach((k, i) => {
+        const v = row[i] || '';
+        if (['amount','yield','durationYears','monthlyPmt'].includes(k)) o[k] = parseFloat(v)||0;
+        else if (k === 'indexFund') o[k] = v === 'true';
+        else if (k === 'actualCF') { try { o[k] = JSON.parse(v); } catch { o[k] = {}; } }
+        else o[k] = v;
+      });
+      return o;
+    });
+  } catch { return []; }
+}
+
+async function sheetSaveActuals(actuals) {
+  const header = ['month','personalCash','withdrawal','notes'];
+  const rows = [header, ...Object.entries(actuals).sort().map(([mk, a]) => [
+    mk, a.personalCash??'', a.withdrawal??'', a.notes??'',
+  ])];
+  await gapi.client.sheets.spreadsheets.values.clear({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.ACTUALS+'!A:D' });
+  await gapi.client.sheets.spreadsheets.values.update({
+    spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.ACTUALS+'!A1',
+    valueInputOption: 'RAW', resource: { values: rows },
+  });
+}
+
+async function sheetLoadActuals() {
+  try {
+    const resp = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.ACTUALS+'!A:D' });
+    const rows = resp.result.values || [];
+    if (rows.length < 2) return {};
+    const a = {};
+    for (const row of rows.slice(1)) {
+      if (!row[0]) continue;
+      a[row[0]] = { personalCash: row[1]!==''?parseFloat(row[1]):null, withdrawal: row[2]!==''?parseFloat(row[2]):0, notes: row[3]||'' };
+    }
+    return a;
+  } catch { return {}; }
+}
+
+
+const { useState, useMemo, useEffect, useCallback, useRef } = React;
+
+/* ══════════════════════════════════════════════
+   CASHFLOW STACKING v4 — CALCULATOR + TRACKER
+   Persistent storage · Cross-device sync
+   ══════════════════════════════════════════════ */
+
+const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const fmt = n => n == null || isNaN(n) ? "$0" : "$" + Math.round(n).toLocaleString();
+const fmtK = n => { const a = Math.abs(n); return (n<0?'-':'') + (a>=1e6?'$'+(a/1e6).toFixed(1)+'M':a>=1e3?'$'+(a/1e3).toFixed(0)+'k':fmt(n)); };
+const fmtDate = d => d ? MO[d.getMonth()] + " " + d.getFullYear() : "—";
+const moKey = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+const parseDate = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d||1); };
+const addMo = (d, m) => new Date(d.getFullYear(), d.getMonth() + m, 1);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+
+function monthlyPmt(principal, annualRate, years) {
+  const r = annualRate/12, n = years*12;
+  if (r<=0||n<=0) return principal/Math.max(n,1);
+  return (principal*r*Math.pow(1+r,n))/(Math.pow(1+r,n)-1);
+}
+
+// Tax calculation for index-fund-backed flips
+// Computes net-after-tax monthly payment using FIFO lot-based capital gains
+const TAX_FED_ST = 0.32, TAX_FED_LT = 0.15, TAX_STATE = 0.0465; // Utah
+const TAX_IDX_RETURN = 0.10; // assumed annual index fund return
+const TAX_IDX_MR = Math.pow(1 + TAX_IDX_RETURN, 1/12) - 1;
+
+function calcIndexFundNetPmt(principal, grossPmt, durationMonths) {
+  // Returns array of net payments after tax for each month
+  let lotBasis = principal, lotShares = principal;
+  const nets = [];
+  for (let m = 1; m <= durationMonths; m++) {
+    lotShares *= (1 + TAX_IDX_MR);
+    const sellAmt = Math.min(grossPmt, lotShares);
+    const proportion = lotShares > 0 ? sellAmt / lotShares : 1;
+    const basisSold = lotBasis * proportion;
+    const gain = Math.max(0, sellAmt - basisSold);
+    const isLT = m > 12;
+    const taxRate = isLT ? (TAX_FED_LT + TAX_STATE) : (TAX_FED_ST + TAX_STATE);
+    const tax = gain * taxRate;
+    lotShares -= sellAmt;
+    lotBasis -= basisSold;
+    nets.push(grossPmt - tax);
+  }
+  return nets;
+}
+
+// Get average net payment for an index fund flip
+function avgIndexFundNetPmt(principal, grossPmt, durationMonths) {
+  const nets = calcIndexFundNetPmt(principal, grossPmt, durationMonths);
+  return nets.reduce((s,v) => s+v, 0) / nets.length;
+}
+
+/* ══ STORAGE LAYER ══ */
+// Storage functions — use Google Sheets when signed in, localStorage as fallback
+async function loadData() {
+  if (isGoogleSignedIn()) {
+    try {
+      await ensureTabs();
+      const [settings, actuals, flips] = await Promise.all([
+        sheetLoadSettings(), sheetLoadActuals(), sheetLoadFlips(),
+      ]);
+      return { settings: Object.keys(settings).length > 0 ? settings : null, actuals, flips };
+    } catch(e) { console.error('Sheet load error:', e); }
+  }
+  // Fallback to localStorage
+  try {
+    const s = localStorage.getItem('cfs:settings');
+    const a = localStorage.getItem('cfs:actuals');
+    const f = localStorage.getItem('cfs:flips');
+    return {
+      settings: s ? JSON.parse(s) : null,
+      actuals: a ? JSON.parse(a) : {},
+      flips: f ? JSON.parse(f) : [],
+    };
+  } catch { return { settings: null, actuals: {}, flips: [] }; }
+}
+
+async function saveSettings(data) {
+  try { localStorage.setItem('cfs:settings', JSON.stringify(data)); } catch {}
+  if (isGoogleSignedIn()) {
+    try { await sheetSaveSettings(data); } catch(e) { console.error('Sheet save settings err:', e); }
+  }
+}
+async function saveActuals(data) {
+  try { localStorage.setItem('cfs:actuals', JSON.stringify(data)); } catch {}
+  if (isGoogleSignedIn()) {
+    try { await sheetSaveActuals(data); } catch(e) { console.error('Sheet save actuals err:', e); }
+  }
+}
+async function saveFlips(data) {
+  try { localStorage.setItem('cfs:flips', JSON.stringify(data)); } catch {}
+  if (isGoogleSignedIn()) {
+    try { await sheetSaveFlips(data); } catch(e) { console.error('Sheet save flips err:', e); }
+  }
+}
+
+/* ══ SIMULATION ENGINE ══ */
+
+function simulateFromState(p, initialState) {
+  const { startMonth, startDate, desiredMonthlyWithdrawal, maxFlipSize,
+    defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier,
+    staleThreshold, maxMonths, currentAge, retirementAge, current401k, monthly401kContrib,
+    annual401kYield, monthlyPersonalCash, include401k } = p;
+
+  const monthsToRetirement = Math.max(0, (retirementAge - currentAge) * 12);
+
+  // Core single-month step function (mutates state in place, returns row data)
+  function step(s, m, date, postFreedom) {
+    const pc = postFreedom ? 0 : monthlyPersonalCash;
+    const wd = postFreedom ? desiredMonthlyWithdrawal : 0;
+
+    let deployed = false;
+    if (s.loc <= 0) {
+      s.loc = 0;
+      const gap = m - s.lfm;
+      if (s.faa >= flipsPerAmount && gap < staleThreshold) {
+        s.fa = Math.min(s.fa * growthMultiplier, maxFlipSize); s.faa = 0;
+      }
+      const pmt = monthlyPmt(s.fa, defaultYield, flipDurationYears);
+      s.flips.push({ startMonth: m, pmt, endMonth: m + Math.round(flipDurationYears * 12) });
+      s.loc += s.fa; s.fc++; s.faa++; s.lfm = m; deployed = true;
+    }
+
+    let assetCF = 0;
+    for (const f of s.flips) {
+      if (m > f.startMonth && m <= f.endMonth) {
+        if (f.indexFund && f.amount) {
+          // Cache net payments array on the flip object
+          if (!f._nets) {
+            const dur = f.endMonth - f.startMonth;
+            f._nets = calcIndexFundNetPmt(f.amount, f.pmt, dur);
+          }
+          const flipMo = m - f.startMonth;
+          assetCF += (flipMo > 0 && flipMo <= f._nets.length) ? f._nets[flipMo - 1] : f.pmt;
+        } else {
+          assetCF += f.pmt;
+        }
+      }
+    }
+
+    if (include401k && m < monthsToRetirement) { s.b401k += monthly401kContrib; s.b401k *= (1 + annual401kYield / 12); }
+    const ret401k = (include401k && m >= monthsToRetirement) ? (s.b401k * 0.04) / 12 : 0;
+
+    const locInt = s.loc * (locInterestRate / 12);
+    s.loc = s.loc + locInt - pc - assetCF - ret401k + wd;
+
+    if (s.loc <= 0 && !deployed) {
+      s.loc = 0;
+      const gap = m - s.lfm;
+      if (s.faa >= flipsPerAmount && gap < staleThreshold) {
+        s.fa = Math.min(s.fa * growthMultiplier, maxFlipSize); s.faa = 0;
+      }
+      const pmt = monthlyPmt(s.fa, defaultYield, flipDurationYears);
+      s.flips.push({ startMonth: m, pmt, endMonth: m + Math.round(flipDurationYears * 12) });
+      s.loc += s.fa; s.fc++; s.faa++; s.lfm = m;
+    }
+
+    const totalCF = assetCF + ret401k;
+    return {
+      month: m, date, flipNumber: s.fc, personalCash: pc, assetCF,
+      locBalance: Math.max(0, s.loc),
+      currentFlipAmount: s.fa, balance401k: s.b401k, retirement401kMonthly: ret401k,
+      totalMonthlyCF: totalCF, monthlyWithdrawalOut: wd,
+      activeFlipCount: s.flips.filter(f => m >= f.startMonth && m <= f.endMonth).length,
+      source: 'forecast',
+    };
+  }
+
+  function cloneState(s) {
+    return { loc: s.loc, flips: s.flips.map(f => ({...f})), fc: s.fc, faa: s.faa,
+      fa: s.fa, lfm: s.lfm, b401k: s.b401k };
+  }
+
+  function makeState(is) {
+    return { loc: is.locBalance, flips: is.activeFlips.map(f => ({...f})),
+      fc: is.flipCount, faa: is.flipsAtCurrentAmt, fa: is.currentFlipAmt,
+      lfm: is.lastFlipMonth, b401k: is.balance401k };
+  }
+
+  // Test if the system is self-sustaining indefinitely from this point
+  // Runs 50 years forward with $0 personal cash and desired withdrawal
+  function testSustainable(savedState, fromMonth) {
+    const ts = cloneState(savedState);
+    let peakCF = 0;
+    for (let t = 0; t < 600; t++) {
+      const tm = fromMonth + 1 + t;
+      const date = addMo(startDate, tm - startMonth);
+      const row = step(ts, tm, date, true);
+      if (row.assetCF > peakCF) peakCF = row.assetCF;
+      const hasActive = ts.flips.some(f => tm < f.endMonth);
+      if (peakCF > 0 && row.assetCF <= 0 && !hasActive) return false;
+    }
+    return true;
+  }
+
+  // === Main simulation ===
+  const state = makeState(initialState);
+  const rows = [];
+  let freedomDate = null, freedomMonth = null;
+  let freedomReached = initialState.freedomReached || false;
+  let cfDepletedDate = null, cfDepletedMonth = null, peakAssetCF = 0;
+
+  if (freedomReached) {
+    freedomMonth = startMonth;
+    freedomDate = addMo(startDate, 0);
+  }
+
+  for (let i = 0; i < maxMonths; i++) {
+    const m = startMonth + i;
+    const date = addMo(startDate, i);
+    const row = step(state, m, date, freedomReached);
+    rows.push(row);
+
+    // Freedom check: can the system sustain itself if I stop contributing and start withdrawing?
+    if (!freedomReached && row.assetCF > 0 && row.assetCF >= desiredMonthlyWithdrawal * 0.5) {
+      const snapshot = cloneState(state);
+      if (testSustainable(snapshot, m)) {
+        freedomReached = true;
+        freedomDate = date;
+        freedomMonth = m;
+      }
+    }
+
+    // CF depletion tracking
+    if (row.assetCF > peakAssetCF) peakAssetCF = row.assetCF;
+    const hasActiveFuture = state.flips.some(f => m < f.endMonth);
+    if (!cfDepletedDate && peakAssetCF > 0 && row.assetCF <= 0 && !hasActiveFuture && freedomReached) {
+      cfDepletedDate = date; cfDepletedMonth = m;
+    }
+  }
+
+  return { rows, freedomDate, freedomMonth, cfDepletedDate, cfDepletedMonth };
+}
+
+/* Index fund sim */
+function simulateIndexFund(p) {
+  const { startDate, monthlyPersonalCash, desiredMonthlyWithdrawal, annualReturn, maxMonths } = p;
+  const rows = []; let balance = 0, freedomMonth = null, freedomDate = null;
+  let depletedMonth = null, depletedDate = null, phase = "accumulate";
+  for (let m = 0; m < maxMonths; m++) {
+    const mr = annualReturn / 12;
+    if (phase === "accumulate") {
+      balance += monthlyPersonalCash; balance *= (1 + mr);
+      const w = (balance * 0.04) / 12;
+      if (w >= desiredMonthlyWithdrawal) { freedomDate = addMo(startDate, m); freedomMonth = m; phase = "drawdown"; }
+      rows.push({ month: m, date: addMo(startDate, m), balance, monthlyWithdrawable: w, phase: "accumulate" });
+    } else if (phase === "drawdown") {
+      balance *= (1 + mr); balance -= desiredMonthlyWithdrawal;
+      if (balance <= 0) { balance = 0; depletedDate = addMo(startDate, m); depletedMonth = m; phase = "depleted"; }
+      rows.push({ month: m, date: addMo(startDate, m), balance, monthlyWithdrawable: balance > 0 ? desiredMonthlyWithdrawal : 0, phase });
+    } else {
+      rows.push({ month: m, date: addMo(startDate, m), balance: 0, monthlyWithdrawable: 0, phase: "depleted" });
+    }
+  }
+  return { rows, freedomDate, freedomMonth, depletedDate, depletedMonth };
+}
+
+/* ══ UI COMPONENTS ══ */
+
+function Spark({ data, h = 50, color = "#22d3ee" }) {
+  if (!data?.length) return null;
+  const max = Math.max(...data, 1), w = data.length * 3;
+  const pts = data.map((v, i) => `${i*3},${h-(v/max)*(h-6)-3}`).join(' ');
+  const area = pts + ` ${(data.length-1)*3},${h} 0,${h}`;
+  const id = `sp${color.slice(1)}`;
+  return (
+    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+      <defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity=".22"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs>
+      <polygon points={area} fill={`url(#${id})`}/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+function DualChart({ rows, idxData, target }) {
+  if (!rows?.length) return null;
+  const W = 800, H = 300, P = { t: 28, r: 18, b: 38, l: 72 };
+  const cw = W-P.l-P.r, ch = H-P.t-P.b;
+  const cfV = rows.map(d => d.assetCF||0);
+  const idxV = idxData ? idxData.slice(0, rows.length).map(d => d.monthlyWithdrawable||0) : [];
+  const maxY = Math.max(...cfV, ...idxV, target*1.2, 1);
+  const x = i => P.l + (i/Math.max(rows.length-1,1))*cw;
+  const y = v => P.t + ch - (v/maxY)*ch;
+  const path = vals => vals.map((v,i)=>`${i===0?'M':'L'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area = vals => path(vals)+` L${x(vals.length-1).toFixed(1)},${P.t+ch} L${x(0).toFixed(1)},${P.t+ch} Z`;
+  const yT = [0,.25,.5,.75,1].map(p=>({v:maxY*p,y:y(maxY*p)}));
+  const xT = []; const step = Math.max(1, Math.floor(rows.length/7));
+  for (let i=0;i<rows.length;i+=step) xT.push({l:fmtDate(rows[i].date),x:x(i)});
+
+  // Find actual/forecast boundary
+  const lastActIdx = rows.findIndex(r => r.source === 'forecast');
+  const boundaryX = lastActIdx > 0 ? x(lastActIdx) : null;
+
+  // Find freedom and depletion
+  const freeIdx = -1; // freedom marker handled separately
+  const actualFreeIdx = -1; // freedom marker handled by parent
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',height:'auto'}}>
+      <defs>
+        <linearGradient id="cfg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#06b6d4" stopOpacity=".15"/><stop offset="100%" stopColor="#06b6d4" stopOpacity="0"/></linearGradient>
+      </defs>
+      {yT.map((t,i)=>(<g key={i}><line x1={P.l} y1={t.y} x2={W-P.r} y2={t.y} stroke="#1e293b"/><text x={P.l-6} y={t.y+3} textAnchor="end" fill="#475569" fontSize="9" fontFamily="monospace">{fmtK(t.v)}</text></g>))}
+      {xT.map((t,i)=><text key={i} x={t.x} y={H-6} textAnchor="middle" fill="#475569" fontSize="8" fontFamily="monospace">{t.l}</text>)}
+
+      {/* Actual/Forecast boundary */}
+      {boundaryX && (<g>
+        <line x1={boundaryX} y1={P.t} x2={boundaryX} y2={P.t+ch} stroke="#475569" strokeWidth="1" strokeDasharray="2,4" opacity=".5"/>
+        <text x={boundaryX+4} y={P.t+10} fill="#475569" fontSize="7" fontFamily="monospace">Forecast →</text>
+      </g>)}
+
+      <path d={area(cfV)} fill="url(#cfg)"/>
+      <path d={path(cfV)} fill="none" stroke="#06b6d4" strokeWidth="2"/>
+      {idxV.length>0 && <path d={path(idxV)} fill="none" stroke="#f97316" strokeWidth="1.5" strokeDasharray="2,3" opacity=".7"/>}
+      <line x1={P.l} y1={y(target)} x2={W-P.r} y2={y(target)} stroke="#ef4444" strokeWidth="1" strokeDasharray="3,4" opacity=".4"/>
+      <text x={W-P.r-2} y={y(target)-4} textAnchor="end" fill="#ef4444" fontSize="8" fontFamily="monospace" opacity=".5">Target {fmt(target)}</text>
+
+      {actualFreeIdx > 0 && actualFreeIdx < rows.length && (<g>
+        <line x1={x(actualFreeIdx)} y1={P.t} x2={x(actualFreeIdx)} y2={P.t+ch} stroke="#22c55e" strokeWidth="1.5" strokeDasharray="4,3"/>
+        <circle cx={x(actualFreeIdx)} cy={y(cfV[actualFreeIdx])} r="4" fill="#22c55e" stroke="#020617" strokeWidth="1.5"/>
+        <rect x={x(actualFreeIdx)-36} y={P.t-1} width="72" height="15" rx="4" fill="#22c55e"/>
+        <text x={x(actualFreeIdx)} y={P.t+9.5} textAnchor="middle" fill="#020617" fontSize="7.5" fontWeight="800" fontFamily="monospace">FREEDOM</text>
+      </g>)}
+    </svg>
+  );
+}
+
+function Inp({ label, value, onChange, pre, suf, step, min, max, type="number", note, small, style: sx }) {
+  return (
+    <div style={{ marginBottom: small?8:14, ...sx }}>
+      <label style={{display:'block',fontSize:9,fontWeight:700,color:'#94a3b8',marginBottom:3,textTransform:'uppercase',letterSpacing:'.08em',fontFamily:'var(--m)'}}>
+        {label}{note&&<span style={{color:'#475569',fontWeight:400,textTransform:'none',letterSpacing:0,marginLeft:5,fontSize:8}}>{note}</span>}
+      </label>
+      <div style={{display:'flex',alignItems:'center',background:'#0f172a',border:'1px solid #1e293b',borderRadius:6,padding:'0 8px'}}>
+        {pre&&<span style={{color:'#475569',fontSize:12,marginRight:2,fontFamily:'var(--m)'}}>{pre}</span>}
+        <input type={type} value={value} step={step} min={min} max={max}
+          onChange={e=>onChange(type==="number"?parseFloat(e.target.value)||0:e.target.value)}
+          style={{flex:1,background:'transparent',border:'none',outline:'none',color:'#e2e8f0',fontSize:13,padding:'7px 0',fontFamily:'var(--m)',width:'100%'}}/>
+        {suf&&<span style={{color:'#475569',fontSize:10,marginLeft:2,fontFamily:'var(--m)'}}>{suf}</span>}
+      </div>
+    </div>
+  );
+}
+
+function Card({ label, value, sub, color="#06b6d4", icon }) {
+  return (
+    <div style={{background:'linear-gradient(145deg,#0f172a,#1a2332)',border:'1px solid #1e293b',borderRadius:10,padding:'14px 12px',flex:'1 1 150px',minWidth:140,position:'relative',overflow:'hidden'}}>
+      <div style={{position:'absolute',top:-12,right:-12,width:48,height:48,borderRadius:'50%',background:color,opacity:.04}}/>
+      <div style={{fontSize:9,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.07em',marginBottom:5,fontFamily:'var(--m)'}}>{icon&&<span style={{marginRight:4}}>{icon}</span>}{label}</div>
+      <div style={{fontSize:20,fontWeight:800,color,lineHeight:1.1,fontFamily:'var(--d)'}}>{value}</div>
+      {sub&&<div style={{fontSize:9,color:'#475569',marginTop:2,fontFamily:'var(--m)'}}>{sub}</div>}
+    </div>
+  );
+}
+
+function Btn({ children, onClick, color="#06b6d4", small, disabled }) {
+  return <button onClick={onClick} disabled={disabled} style={{
+    padding: small?'5px 10px':'8px 16px', borderRadius:6, border:`1px solid ${color}33`,
+    background:`${color}11`, color, fontSize: small?10:11, fontWeight:600, cursor: disabled?'not-allowed':'pointer',
+    fontFamily:'var(--m)', opacity: disabled?.5:1, transition:'all .15s',
+  }}>{children}</button>;
+}
+
+/* ══════════════════════════════════════════════
+   MAIN APP
+   ══════════════════════════════════════════════ */
+function App({ googleReady, signedIn, onSignIn, onSignOut }) {
+  // Settings
+  const [startDate, setStartDate] = useState("2024-08-01");
+  const [monthlyPersonalCash, setMonthlyPersonalCash] = useState(2000);
+  const [startingFlipAmount, setStartingFlipAmount] = useState(9500);
+  const [desiredMonthlyWithdrawal, setDesiredMonthlyWithdrawal] = useState(10000);
+  const [maxFlipSize, setMaxFlipSize] = useState(600000);
+  const [defaultYield, setDefaultYield] = useState(8);
+  const [locInterestRate, setLocInterestRate] = useState(4);
+  const [flipDurationYears, setFlipDurationYears] = useState(3);
+  const [flipsPerAmount, setFlipsPerAmount] = useState(4);
+  const [growthMultiplier, setGrowthMultiplier] = useState(1.5);
+  const [staleThreshold, setStaleThreshold] = useState(12);
+  const [currentAge, setCurrentAge] = useState(35);
+  const [retirementAge, setRetirementAge] = useState(60);
+  const [current401k, setCurrent401k] = useState(250000);
+  const [include401k, setInclude401k] = useState(true);
+  const [monthly401kContrib, setMonthly401kContrib] = useState(1400);
+  const [annual401kYield, setAnnual401kYield] = useState(7);
+  const [indexFundReturn, setIndexFundReturn] = useState(10);
+
+  // Actuals
+  const [actuals, setActuals] = useState({}); // keyed by "YYYY-MM" -> { personalCash, withdrawal, notes }
+  const [trackedFlips, setTrackedFlips] = useState([]); // [{id, name, amount, yield, startDate, durationYears, monthlyPmt, actualCF: {"YYYY-MM": amount}}]
+
+  // UI
+  const [tab, setTab] = useState("dashboard");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editMonth, setEditMonth] = useState('');
+  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false });
+  const [editingFlipId, setEditingFlipId] = useState(null);
+  const [exportData, setExportData] = useState(null);
+  const [importData, setImportData] = useState('');
+  const [showImport, setShowImport] = useState(false);
+  const [detailRange, setDetailRange] = useState('default'); // 'default', 'all', '10yr', '20yr', '30yr'
+
+  // Load from storage on mount
+  useEffect(() => {
+    loadData().then(({ settings, actuals: a, flips: f }) => {
+      if (settings) {
+        if (settings.startDate) setStartDate(settings.startDate);
+        if (settings.monthlyPersonalCash != null) setMonthlyPersonalCash(settings.monthlyPersonalCash);
+        if (settings.startingFlipAmount != null) setStartingFlipAmount(settings.startingFlipAmount);
+        if (settings.desiredMonthlyWithdrawal != null) setDesiredMonthlyWithdrawal(settings.desiredMonthlyWithdrawal);
+        if (settings.maxFlipSize != null) setMaxFlipSize(settings.maxFlipSize);
+        if (settings.defaultYield != null) setDefaultYield(settings.defaultYield);
+        if (settings.locInterestRate != null) setLocInterestRate(settings.locInterestRate);
+        if (settings.flipDurationYears != null) setFlipDurationYears(settings.flipDurationYears);
+        if (settings.flipsPerAmount != null) setFlipsPerAmount(settings.flipsPerAmount);
+        if (settings.growthMultiplier != null) setGrowthMultiplier(settings.growthMultiplier);
+        if (settings.staleThreshold != null) setStaleThreshold(settings.staleThreshold);
+        if (settings.currentAge != null) setCurrentAge(settings.currentAge);
+        if (settings.retirementAge != null) setRetirementAge(settings.retirementAge);
+        if (settings.current401k != null) setCurrent401k(settings.current401k);
+        if (settings.include401k != null) setInclude401k(settings.include401k);
+        if (settings.monthly401kContrib != null) setMonthly401kContrib(settings.monthly401kContrib);
+        if (settings.annual401kYield != null) setAnnual401kYield(settings.annual401kYield);
+        if (settings.indexFundReturn != null) setIndexFundReturn(settings.indexFundReturn);
+      }
+      if (a) setActuals(a);
+      if (f && f.length) setTrackedFlips(f);
+      setLoaded(true);
+    });
+  }, []);
+
+  // Auto-save settings
+  const saveTimer = useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      setSaving(true);
+      const s = { startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal,
+        maxFlipSize, defaultYield, locInterestRate, flipDurationYears,
+        flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge,
+        current401k, monthly401kContrib, annual401kYield, indexFundReturn,
+        include401k };
+      saveSettings(s).then(() => setTimeout(()=>setSaving(false), 500));
+    }, 800);
+  }, [loaded, startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, indexFundReturn, include401k]);
+
+  // Save actuals/flips
+  const persistActuals = useCallback((a) => { setActuals(a); saveActuals(a); }, []);
+  const persistFlips = useCallback((f) => { setTrackedFlips(f); saveFlips(f); }, []);
+
+  /* ── Build combined actuals + forecast rows ── */
+  const { combinedRows, freedomDate, freedomMonth, cfDepletedDate } = useMemo(() => {
+    const sd = parseDate(startDate);
+    const dy = defaultYield / 100;
+    const lr = locInterestRate / 100;
+    const ay = annual401kYield / 100;
+
+    // Sort actual months
+    const actualMonthKeys = Object.keys(actuals).sort();
+
+    // Build actual rows - LOC calculated from flip deployments, CF, personal cash, withdrawals
+    const actualRows = [];
+    let runningLOC = 0;
+    let actualFlipCount = trackedFlips.length;
+
+    for (const mk of actualMonthKeys) {
+      const [yr, mo] = mk.split('-').map(Number);
+      const date = new Date(yr, mo - 1, 1);
+      const monthIdx = (yr - sd.getFullYear()) * 12 + (mo - 1 - sd.getMonth());
+      if (monthIdx < 0) continue;
+
+      const a = actuals[mk];
+      const personalCash = a.personalCash ?? 0;
+      const withdrawal = a.withdrawal || 0;
+
+      // Compute asset CF from tracked flips for this month
+      let assetCF = 0;
+      for (const f of trackedFlips) {
+        const cfOverride = f.actualCF?.[mk];
+        if (cfOverride != null) {
+          assetCF += cfOverride;
+        } else {
+          const fStart = parseDate(f.startDate);
+          const fStartMonth = (fStart.getFullYear() - sd.getFullYear()) * 12 + (fStart.getMonth() - sd.getMonth());
+          const fEndMonth = fStartMonth + Math.round(f.durationYears * 12);
+          if (monthIdx > fStartMonth && monthIdx <= fEndMonth) {
+            const grossPmt = f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears);
+            if (f.indexFund) {
+              const flipMonth = monthIdx - fStartMonth;
+              const nets = calcIndexFundNetPmt(f.amount, grossPmt, Math.round(f.durationYears * 12));
+              assetCF += (flipMonth > 0 && flipMonth <= nets.length) ? nets[flipMonth - 1] : grossPmt;
+            } else {
+              assetCF += grossPmt;
+            }
+          }
+        }
+      }
+
+      // Check if a new flip was deployed this month (adds to LOC)
+      for (const f of trackedFlips) {
+        const fStart = parseDate(f.startDate);
+        const fStartMonth = (fStart.getFullYear() - sd.getFullYear()) * 12 + (fStart.getMonth() - sd.getMonth());
+        if (fStartMonth === monthIdx) {
+          runningLOC += f.amount;
+        }
+      }
+
+      // Calculate LOC: previous LOC + interest - personalCash - assetCF + withdrawal
+      const locInt = runningLOC * (lr / 12);
+      runningLOC = runningLOC + locInt - personalCash - assetCF + withdrawal;
+      if (runningLOC < 0) runningLOC = 0;
+
+      const locBalance = runningLOC;
+      const totalCF = assetCF;
+
+      actualRows.push({
+        month: monthIdx, date, flipNumber: actualFlipCount, personalCash,
+        assetCF, locBalance,
+        currentFlipAmount: 0, balance401k: 0, retirement401kMonthly: 0,
+        totalMonthlyCF: totalCF, monthlyWithdrawalOut: withdrawal,
+        activeFlipCount: trackedFlips.filter(f => {
+          const fs = parseDate(f.startDate);
+          const fsm = (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
+          const fem = fsm + Math.round(f.durationYears*12);
+          return monthIdx >= fsm && monthIdx <= fem;
+        }).length,
+        source: 'actual', notes: a.notes || '',
+      });
+    }
+
+    // Determine forecast start state from last actual
+    const lastActual = actualRows.length > 0 ? actualRows[actualRows.length - 1] : null;
+    let forecastStartMonth = 0;
+    let initialState;
+
+    if (lastActual) {
+      forecastStartMonth = lastActual.month + 1;
+      // Build active flips list for forecast
+      const forecastFlips = trackedFlips.map(f => {
+        const fs = parseDate(f.startDate);
+        const fsm = (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
+        return {
+          id: f.id, startMonth: fsm, amount: f.amount,
+          pmt: f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears),
+          yield: (f.yield||8)/100, endMonth: fsm + Math.round(f.durationYears*12),
+          indexFund: f.indexFund || false, source: 'actual',
+        };
+      });
+
+      // Determine current flip sizing state
+      let cfa = startingFlipAmount;
+      let flipsAtAmt = 0;
+      const sortedFlips = [...trackedFlips].sort((a,b) => a.startDate.localeCompare(b.startDate));
+      let prevAmt = 0;
+      for (const f of sortedFlips) {
+        if (f.amount !== prevAmt) { flipsAtAmt = 0; prevAmt = f.amount; }
+        flipsAtAmt++;
+        cfa = f.amount;
+      }
+
+      const lastFlipStart = sortedFlips.length > 0 ? (() => {
+        const lf = sortedFlips[sortedFlips.length - 1];
+        const fs = parseDate(lf.startDate);
+        return (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
+      })() : -999;
+
+      const isFree = lastActual.assetCF >= desiredMonthlyWithdrawal;
+
+      initialState = {
+        locBalance: lastActual.locBalance || 0,  // now auto-calculated
+        activeFlips: forecastFlips,
+        flipCount: trackedFlips.length,
+        flipsAtCurrentAmt: flipsAtAmt,
+        currentFlipAmt: cfa,
+        lastFlipMonth: lastFlipStart,
+        balance401k: current401k,
+        freedomReached: isFree,
+      };
+    } else if (trackedFlips.length > 0) {
+      // Tracked flips exist but no monthly actuals entered
+      // Build forecast state from the tracked flips
+      const forecastFlips = trackedFlips.map(f => {
+        const fs = parseDate(f.startDate);
+        const fsm = (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
+        return {
+          id: f.id, startMonth: fsm, amount: f.amount,
+          pmt: f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears),
+          yield: (f.yield||8)/100, endMonth: fsm + Math.round(f.durationYears*12),
+          indexFund: f.indexFund || false, source: 'actual',
+        };
+      });
+
+      // Count flips at current amount tier
+      let cfa = startingFlipAmount;
+      let flipsAtAmt = 0;
+      const sortedFlips = [...trackedFlips].sort((a,b) => a.startDate.localeCompare(b.startDate));
+      let prevAmt = 0;
+      for (const f of sortedFlips) {
+        if (f.amount !== prevAmt) { flipsAtAmt = 0; prevAmt = f.amount; }
+        flipsAtAmt++;
+        cfa = f.amount;
+      }
+
+      const lastFlipStart = (() => {
+        const lf = sortedFlips[sortedFlips.length - 1];
+        const fs = parseDate(lf.startDate);
+        return (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
+      })();
+
+      // Calculate current LOC by simulating from first flip to now
+      let calcLOC = 0;
+      const firstFlipMonth = (() => {
+        const fs = parseDate(sortedFlips[0].startDate);
+        return (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
+      })();
+      const nowMonth = (new Date().getFullYear()-sd.getFullYear())*12+(new Date().getMonth()-sd.getMonth());
+
+      for (let m = firstFlipMonth; m <= nowMonth; m++) {
+        for (const ff of forecastFlips) { if (ff.startMonth === m) calcLOC += ff.amount; }
+        let cf = 0;
+        for (const ff of forecastFlips) { if (m > ff.startMonth && m <= ff.endMonth) cf += ff.pmt; }
+        calcLOC = Math.max(0, calcLOC + calcLOC * (lr / 12) - monthlyPersonalCash - cf);
+      }
+
+      forecastStartMonth = nowMonth + 1;
+      initialState = {
+        locBalance: calcLOC,
+        activeFlips: forecastFlips,
+        flipCount: trackedFlips.length,
+        flipsAtCurrentAmt: flipsAtAmt,
+        currentFlipAmt: cfa,
+        lastFlipMonth: lastFlipStart,
+        balance401k: current401k || 0,
+        freedomReached: false,
+      };
+    } else {
+      const pmt0 = monthlyPmt(startingFlipAmount, dy, flipDurationYears);
+      initialState = {
+        locBalance: startingFlipAmount,
+        activeFlips: [{ id: uid(), startMonth: 0, amount: startingFlipAmount, pmt: pmt0,
+          yield: dy, endMonth: Math.round(flipDurationYears*12), source: 'forecast' }],
+        flipCount: 1,
+        flipsAtCurrentAmt: 1,
+        currentFlipAmt: startingFlipAmount,
+        lastFlipMonth: 0,
+        balance401k: current401k || 0,
+        freedomReached: false,
+      };
+      forecastStartMonth = 1; // first month is the flip deploy, forecast from month 1
+      // Add month 0 as a "forecast" row
+      actualRows.push({
+        month: 0, date: sd, flipNumber: 1, personalCash: monthlyPersonalCash,
+        assetCF: 0, locBalance: startingFlipAmount,
+        currentFlipAmount: startingFlipAmount, balance401k: current401k,
+        retirement401kMonthly: 0, totalMonthlyCF: 0, monthlyWithdrawalOut: 0,
+        activeFlipCount: 1, source: 'forecast',
+      });
+    }
+
+    const forecast = simulateFromState({
+      startMonth: forecastStartMonth, startDate: addMo(sd, forecastStartMonth),
+      desiredMonthlyWithdrawal, maxFlipSize, defaultYield: dy,
+      locInterestRate: lr, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold,
+      maxMonths: 600 - forecastStartMonth, currentAge, retirementAge, current401k,
+      monthly401kContrib, annual401kYield: ay, monthlyPersonalCash,
+      include401k,
+    }, { ...initialState, activeFlips: [...initialState.activeFlips] });
+
+    const combined = [...actualRows, ...forecast.rows];
+    return {
+      combinedRows: combined,
+      freedomDate: forecast.freedomDate || (lastActual && lastActual.assetCF >= desiredMonthlyWithdrawal ? lastActual.date : null),
+      freedomMonth: forecast.freedomMonth,
+      cfDepletedDate: forecast.cfDepletedDate,
+    };
+  }, [startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, actuals, trackedFlips, include401k]);
+
+  const idxSim = useMemo(() => simulateIndexFund({
+    startDate: parseDate(startDate), monthlyPersonalCash, desiredMonthlyWithdrawal,
+    annualReturn: indexFundReturn/100, maxMonths: 600,
+  }), [startDate, monthlyPersonalCash, desiredMonthlyWithdrawal, indexFundReturn]);
+
+  // Compute display data
+  const freeMonth = freedomMonth;
+  const yf = freeMonth != null ? Math.floor(freeMonth/12) : null;
+  const mr = freeMonth != null ? freeMonth % 12 : null;
+  const teDefault = Math.min(freeMonth != null ? freeMonth + 60 : 240, combinedRows.length);
+  const teMap = { 'default': teDefault, '10yr': 120, '20yr': 240, '30yr': 360, 'all': combinedRows.length };
+  const te = Math.min(teMap[detailRange] || teDefault, combinedRows.length);
+  const tRows = combinedRows.slice(0, te);
+  const sr = Math.max(1, Math.floor(te / 280));
+  const cd = tRows.filter((_,i) => i%sr===0);
+  const idxCd = idxSim.rows.slice(0,te).filter((_,i)=>i%sr===0);
+  const actualCount = tRows.filter(r => r.source === 'actual').length;
+
+  // Actuals entry helpers
+  const sd = parseDate(startDate);
+  const today = new Date();
+  const currentMoKey = moKey(today);
+  const allMonthKeys = [];
+  for (let d = new Date(sd); d <= today; d = addMo(d, 1)) {
+    allMonthKeys.push(moKey(d));
+  }
+
+  const updateActual = (mk, field, value) => {
+    const next = { ...actuals, [mk]: { ...(actuals[mk]||{}), [field]: value } };
+    persistActuals(next);
+  };
+
+  const updateFlipCF = (flipId, mk, value) => {
+    const next = trackedFlips.map(f => f.id === flipId
+      ? { ...f, actualCF: { ...(f.actualCF||{}), [mk]: value } }
+      : f
+    );
+    persistFlips(next);
+  };
+
+  const addFlip = () => {
+    if (!newFlipForm.name || !newFlipForm.startDate) return;
+    const f = {
+      id: uid(), name: newFlipForm.name, amount: newFlipForm.amount,
+      yield: newFlipForm.yield, startDate: newFlipForm.startDate,
+      durationYears: newFlipForm.durationYears,
+      monthlyPmt: monthlyPmt(newFlipForm.amount, newFlipForm.yield/100, newFlipForm.durationYears),
+      indexFund: newFlipForm.indexFund || false,
+      actualCF: {},
+    };
+    persistFlips([...trackedFlips, f]);
+    setNewFlipForm({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false });
+  };
+
+  const removeFlip = (id) => { persistFlips(trackedFlips.filter(f=>f.id!==id)); };
+
+  const updateFlip = (id, field, value) => {
+    const next = trackedFlips.map(f => {
+      if (f.id !== id) return f;
+      const updated = { ...f, [field]: value };
+      // Recalculate monthly payment when amount, yield, or duration changes
+      if (['amount','yield','durationYears'].includes(field)) {
+        updated.monthlyPmt = monthlyPmt(updated.amount, (updated.yield||8)/100, updated.durationYears);
+      }
+      return updated;
+    });
+    persistFlips(next);
+  };
+
+  const resetAll = async () => {
+    if (!confirm('Reset all saved data? This cannot be undone.')) return;
+    try {
+      await window.storage.delete(KEYS.settings);
+      await window.storage.delete(KEYS.actuals);
+      await window.storage.delete(KEYS.flips);
+    } catch {}
+    setActuals({}); setTrackedFlips([]);
+  };
+
+  const tabs = [
+    ['dashboard','◇ Dashboard'],
+    ['actuals','📊 Actuals'],
+    ['flips','🔄 Flips'],
+    ['detail','▤ Detail'],
+    ['settings','⚙ Settings'],
+  ];
+
+  if (!loaded) return (
+    <div style={{background:'#020617',color:'#475569',minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'monospace'}}>
+      Loading saved data...
+    </div>
+  );
+
+  return (
+    <div style={{'--d':"'Bricolage Grotesque', sans-serif",'--m':"'DM Mono', monospace",fontFamily:'var(--d)',background:'#020617',color:'#e2e8f0',minHeight:'100vh'}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:#0f172a}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+        .tb:hover{background:#0c1525!important}
+        @keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}.fi{animation:fi .3s ease-out both}
+        @keyframes glow{0%,100%{box-shadow:0 0 8px rgba(34,197,94,.3)}50%{box-shadow:0 0 18px rgba(34,197,94,.1)}}
+        input[type=number]::-webkit-inner-spin-button{opacity:1}
+      `}</style>
+
+      {/* HEADER */}
+      <header style={{borderBottom:'1px solid #1e293b',padding:'14px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10,background:'linear-gradient(180deg,#0f172a,#020617)'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:32,height:32,borderRadius:8,background:'linear-gradient(135deg,#06b6d4,#8b5cf6)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,fontWeight:800,color:'#020617'}}>CF</div>
+          <div>
+            <h1 style={{fontSize:16,fontWeight:800,letterSpacing:'-.02em',color:'#f1f5f9'}}>Cashflow Stacking</h1>
+            <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',letterSpacing:'.06em'}}>
+              CALCULATOR & TRACKER {saving && <span style={{color:'#f59e0b'}}>· saving...</span>}
+              {!saving && signedIn && <span style={{color:'#22c55e'}}>· Sheets synced</span>}
+              {!saving && !signedIn && <span style={{color:'#475569'}}>· local only</span>}
+              {!saving && actualCount > 0 && <span style={{color:'#22c55e'}}>· {actualCount} months tracked</span>}
+            </div>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+          <div style={{
+            display:'flex',alignItems:'center',gap:8,padding:'8px 14px',borderRadius:8,
+            background: freedomDate ? 'rgba(34,197,94,.06)' : 'rgba(239,68,68,.06)',
+            border:`1px solid ${freedomDate ? 'rgba(34,197,94,.12)' : 'rgba(239,68,68,.12)'}`,
+            ...(freedomDate ? {animation:'glow 3s ease-in-out infinite'} : {}),
+          }}>
+            <div style={{width:7,height:7,borderRadius:'50%',background:freedomDate?'#22c55e':'#ef4444'}}/>
+            <div>
+              <div style={{fontSize:8,color:'#64748b',fontFamily:'var(--m)',letterSpacing:'.06em',fontWeight:500}}>FREEDOM</div>
+              <div style={{fontSize:14,fontWeight:800,color:freedomDate?'#22c55e':'#ef4444'}}>{freedomDate?fmtDate(freedomDate):">50yr"}</div>
+              {freeMonth!=null&&<div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{yf}y {mr}m</div>}
+            </div>
+          </div>
+          <div style={{padding:'8px 14px',borderRadius:8,background:'rgba(249,115,22,.04)',border:'1px solid rgba(249,115,22,.1)'}}>
+            <div style={{fontSize:8,color:'#64748b',fontFamily:'var(--m)',letterSpacing:'.06em',fontWeight:500}}>INDEX FUND</div>
+            <div style={{fontSize:14,fontWeight:800,color:'#f97316'}}>{idxSim.freedomDate?fmtDate(idxSim.freedomDate):">50yr"}</div>
+          </div>
+        </div>
+      </header>
+
+      {/* TABS */}
+      <div style={{padding:'8px 20px',borderBottom:'1px solid #0f172a',display:'flex',gap:4,overflowX:'auto'}}>
+        {tabs.map(([id,l])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{
+            padding:'7px 14px',borderRadius:6,border:tab===id?'1px solid #164e63':'1px solid transparent',
+            background:tab===id?'#0c1929':'transparent',color:tab===id?'#06b6d4':'#64748b',
+            fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'var(--m)',transition:'all .15s',whiteSpace:'nowrap',
+          }}>{l}</button>
+        ))}
+      </div>
+
+      <div style={{padding:'20px',maxWidth:1200,margin:'0 auto'}}>
+
+        {/* ═══ DASHBOARD ═══ */}
+        {tab==="dashboard"&&(
+          <div className="fi">
+            {/* Freedom definition */}
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:'12px 16px',marginBottom:14,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+              <div style={{fontSize:10,fontWeight:700,color:'#64748b',fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>Freedom</div>
+              <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',lineHeight:1.5}}>
+                Earliest month where you can withdraw <span style={{color:'#06b6d4'}}>{fmt(desiredMonthlyWithdrawal)}/mo</span>, stop contributing, and flips sustain indefinitely
+              </div>
+            </div>
+
+
+            <div style={{display:'flex',flexWrap:'wrap',gap:10,marginBottom:20}}>
+              <Card label="Freedom Date" value={freedomDate?fmtDate(freedomDate):"N/A"} sub={freeMonth!=null?`${yf}y ${mr}m · self-sustaining${include401k?'':' · 401k off'}`:`Adjust inputs`} color="#22c55e" icon="🎯"/>
+              <Card label="Desired Withdrawal" value={fmt(desiredMonthlyWithdrawal)} sub="/mo at freedom" color="#a78bfa" icon="💰"/>
+              <Card label="Tracked Flips" value={trackedFlips.length} sub={`${actualCount} months of actuals`} color="#f59e0b" icon="🔄"/>
+              <Card label="CF Depleted" value={cfDepletedDate?fmtDate(cfDepletedDate):"Not Depleted"} color={cfDepletedDate?"#ef4444":"#22c55e"} icon={cfDepletedDate?"⚠️":"✅"}/>
+            </div>
+
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:18}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,flexWrap:'wrap',gap:8}}>
+                <div>
+                  <h3 style={{fontSize:14,fontWeight:700}}>Cashflow Trajectory</h3>
+                  <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>Actuals + forecast · dotted line = forecast boundary</div>
+                </div>
+                <div style={{display:'flex',gap:12,fontSize:9,fontFamily:'var(--m)',flexWrap:'wrap'}}>
+                  <span><span style={{color:'#06b6d4'}}>━</span> Asset CF</span>
+                  <span><span style={{color:'#f97316'}}>╌</span> Index Fund</span>
+                </div>
+              </div>
+              <DualChart rows={cd} idxData={idxCd} target={desiredMonthlyWithdrawal}/>
+            </div>
+
+            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+              {[
+                ['Asset CF',cd.map(d=>d.assetCF),'#06b6d4'],
+                ['LOC Balance',cd.map(d=>d.locBalance),'#ef4444'],
+              ].map(([label,data,color])=>(
+                <div key={label} style={{flex:'1 1 200px',background:'#0f172a',border:'1px solid #1e293b',borderRadius:8,padding:12}}>
+                  <div style={{fontSize:9,fontWeight:700,color:'#475569',marginBottom:6,fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.05em'}}>{label}</div>
+                  <Spark data={data} color={color} h={44}/>
+                  <div style={{textAlign:'right',fontSize:12,fontWeight:700,color,marginTop:3,fontFamily:'var(--m)'}}>{data.length?fmtK(data[data.length-1]):'—'}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ ACTUALS ═══ */}
+        {tab==="actuals"&&(
+          <div className="fi">
+            {/* Entry form */}
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:18}}>
+              <h3 style={{fontSize:13,fontWeight:700,marginBottom:14,fontFamily:'var(--m)',color:'#06b6d4'}}>📊 Record Monthly Actuals</h3>
+              <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
+                <Inp label="Month" value={editMonth||currentMoKey} onChange={setEditMonth} type="text" note="YYYY-MM" small style={{flex:'0 0 120px'}}/>
+                <Inp label="Personal Cash" value={actuals[editMonth||currentMoKey]?.personalCash??monthlyPersonalCash} onChange={v=>updateActual(editMonth||currentMoKey,'personalCash',v)} pre="$" step={100} small style={{flex:'1 1 120px'}}/>
+                <Inp label="Withdrawal" value={actuals[editMonth||currentMoKey]?.withdrawal??0} onChange={v=>updateActual(editMonth||currentMoKey,'withdrawal',v)} pre="$" step={100} small style={{flex:'1 1 120px'}}/>
+                <Inp label="Notes" value={actuals[editMonth||currentMoKey]?.notes??''} onChange={v=>updateActual(editMonth||currentMoKey,'notes',v)} type="text" small style={{flex:'2 1 200px'}}/>
+              </div>
+            </div>
+
+            {/* Grid of existing actuals */}
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,overflow:'hidden'}}>
+              <div style={{padding:'12px 16px',borderBottom:'1px solid #1e293b',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <h3 style={{fontSize:12,fontWeight:700,fontFamily:'var(--m)'}}>Monthly History</h3>
+                <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)'}}>{Object.keys(actuals).length} months recorded</div>
+              </div>
+              <div style={{overflowX:'auto',maxHeight:500}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:'var(--m)'}}>
+                  <thead>
+                    <tr style={{borderBottom:'2px solid #1e293b',position:'sticky',top:0,background:'#0f172a',zIndex:1}}>
+                      {['Month','Personal','Asset CF','W/D','Notes',''].map(h=>(
+                        <th key={h} style={{padding:'7px 8px',textAlign:'left',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase'}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allMonthKeys.map(mk => {
+                      const a = actuals[mk];
+                      const hasData = a && (a.personalCash != null);
+                      // Compute CF from tracked flips for this month
+                      let flipCF = 0;
+                      for (const f of trackedFlips) {
+                        if (f.actualCF?.[mk] != null) flipCF += f.actualCF[mk];
+                      }
+                      return (
+                        <tr key={mk} className="tb" style={{borderBottom:'1px solid #0b1120',background:hasData?'rgba(6,182,212,.03)':'transparent',cursor:'pointer'}}
+                          onClick={()=>setEditMonth(mk)}>
+                          <td style={{padding:'6px 8px',color:editMonth===mk?'#06b6d4':'#94a3b8',fontWeight:editMonth===mk?700:400}}>{mk}</td>
+                          <td style={{padding:'6px 8px',color:hasData?'#f59e0b':'#1e293b'}}>{hasData?fmt(a.personalCash??0):'—'}</td>
+                          <td style={{padding:'6px 8px',color:flipCF>0?'#22d3ee':'#1e293b'}}>{flipCF>0?fmt(flipCF):'—'}</td>
+                          <td style={{padding:'6px 8px',color:a?.withdrawal?'#f87171':'#1e293b'}}>{a?.withdrawal?'-'+fmt(a.withdrawal):'—'}</td>
+                          <td style={{padding:'6px 8px',color:'#475569',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a?.notes||''}</td>
+                          <td style={{padding:'6px 8px'}}>
+                            {hasData && <span style={{color:'#22c55e',fontSize:9}}>✓</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ FLIPS ═══ */}
+        {tab==="flips"&&(
+          <div className="fi">
+            {/* Add new flip */}
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:18}}>
+              <h3 style={{fontSize:13,fontWeight:700,marginBottom:14,fontFamily:'var(--m)',color:'#f59e0b'}}>🔄 Add New Flip</h3>
+              <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
+                <Inp label="Name" value={newFlipForm.name} onChange={v=>setNewFlipForm({...newFlipForm,name:v})} type="text" small note="e.g. Flip #1" style={{flex:'1 1 140px'}}/>
+                <Inp label="Amount" value={newFlipForm.amount} onChange={v=>setNewFlipForm({...newFlipForm,amount:v})} pre="$" step={500} small style={{flex:'1 1 100px'}}/>
+                <Inp label="Yield" value={newFlipForm.yield} onChange={v=>setNewFlipForm({...newFlipForm,yield:v})} suf="%" step={0.5} small style={{flex:'0 0 80px'}}/>
+                <Inp label="Start Date" value={newFlipForm.startDate} onChange={v=>setNewFlipForm({...newFlipForm,startDate:v})} type="text" note="YYYY-MM-DD" small style={{flex:'1 1 130px'}}/>
+                <Inp label="Duration" value={newFlipForm.durationYears} onChange={v=>setNewFlipForm({...newFlipForm,durationYears:v})} suf="yrs" step={0.5} small style={{flex:'0 0 90px'}}/>
+                <div style={{flex:'0 0 auto',marginBottom:8,display:'flex',alignItems:'flex-end',paddingBottom:2}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',padding:'6px 0'}} onClick={()=>setNewFlipForm({...newFlipForm,indexFund:!newFlipForm.indexFund})}>
+                    <div style={{width:16,height:16,borderRadius:3,border:'1px solid '+(newFlipForm.indexFund?'#f97316':'#334155'),background:newFlipForm.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                      {newFlipForm.indexFund&&<span style={{color:'#fff',fontSize:10,lineHeight:1}}>\u2713</span>}
+                    </div>
+                    <span style={{fontSize:9,color:newFlipForm.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>Index Fund</span>
+                  </div>
+                </div>
+                <div style={{marginBottom:8}}><Btn onClick={addFlip} color="#22c55e">+ Add Flip</Btn></div>
+              </div>
+            </div>
+
+            {/* Tracked flips list */}
+            {trackedFlips.map(f => {
+              const pmt = f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears);
+              const fStart = parseDate(f.startDate);
+              const fEnd = addMo(fStart, Math.round(f.durationYears * 12));
+              const cfMonths = [];
+              for (let d = addMo(fStart, 1); d <= fEnd && d <= today; d = addMo(d, 1)) {
+                cfMonths.push(moKey(d));
+              }
+
+              return (
+                <div key={f.id} style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:14}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,flexWrap:'wrap',gap:8}}>
+                    {editingFlipId===f.id ? (
+                      <div style={{flex:1}}>
+                        <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end',marginBottom:8}}>
+                          <Inp label="Name" value={f.name} onChange={v=>updateFlip(f.id,'name',v)} type="text" small style={{flex:'1 1 120px'}}/>
+                          <Inp label="Amount" value={f.amount} onChange={v=>updateFlip(f.id,'amount',v)} pre="$" step={500} small style={{flex:'1 1 100px'}}/>
+                          <Inp label="Yield" value={f.yield} onChange={v=>updateFlip(f.id,'yield',v)} suf="%" step={0.5} small style={{flex:'0 0 80px'}}/>
+                          <Inp label="Start Date" value={f.startDate} onChange={v=>updateFlip(f.id,'startDate',v)} type="text" note="YYYY-MM-DD" small style={{flex:'1 1 120px'}}/>
+                          <Inp label="Duration" value={f.durationYears} onChange={v=>updateFlip(f.id,'durationYears',v)} suf="yrs" step={0.5} small style={{flex:'0 0 80px'}}/>
+                          <div style={{flex:'0 0 auto',marginBottom:8,display:'flex',alignItems:'flex-end',paddingBottom:2}}>
+                            <div style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',padding:'6px 0'}} onClick={()=>updateFlip(f.id,'indexFund',!f.indexFund)}>
+                              <div style={{width:16,height:16,borderRadius:3,border:'1px solid '+(f.indexFund?'#f97316':'#334155'),background:f.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                                {f.indexFund&&<span style={{color:'#fff',fontSize:10,lineHeight:1}}>\u2713</span>}
+                              </div>
+                              <span style={{fontSize:9,color:f.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>Index Fund</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{display:'flex',gap:6}}>
+                          <Btn onClick={()=>setEditingFlipId(null)} color="#22c55e" small>Done</Btn>
+                          <Btn onClick={()=>removeFlip(f.id)} color="#ef4444" small>Remove</Btn>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <div style={{display:'flex',alignItems:'center',gap:8}}>
+                            <h4 style={{fontSize:14,fontWeight:700,color:'#06b6d4'}}>{f.name || `Flip ${f.id.slice(0,4)}`}</h4>
+                            {f.indexFund && <span style={{fontSize:8,padding:'2px 6px',borderRadius:4,background:'rgba(249,115,22,.15)',color:'#f97316',fontWeight:700,fontFamily:'var(--m)'}}>INDEX FUND</span>}
+                          </div>
+                          <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>
+                            {fmt(f.amount)} @ {f.yield}% · {f.durationYears}yr · {fmtDate(fStart)} → {fmtDate(fEnd)} · Pmt: {fmt(pmt)}/mo
+                            {f.indexFund && <span style={{color:'#f97316'}}> · Net: {fmt(avgIndexFundNetPmt(f.amount, pmt, Math.round(f.durationYears*12)))}/mo after tax</span>}
+                          </div>
+                        </div>
+                        <div style={{display:'flex',gap:6}}>
+                          <Btn onClick={()=>setEditingFlipId(f.id)} color="#06b6d4" small>Edit</Btn>
+                          <Btn onClick={()=>removeFlip(f.id)} color="#ef4444" small>Remove</Btn>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Monthly CF tracking for this flip */}
+                  {cfMonths.length > 0 && (
+                    <div style={{overflowX:'auto'}}>
+                      <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:'var(--m)'}}>
+                        <thead>
+                          <tr style={{borderBottom:'1px solid #1e293b'}}>
+                            <th style={{padding:'5px 8px',textAlign:'left',color:'#475569',fontSize:8,fontWeight:700}}>MONTH</th>
+                            <th style={{padding:'5px 8px',textAlign:'right',color:'#475569',fontSize:8,fontWeight:700}}>EXPECTED</th>
+                            <th style={{padding:'5px 8px',textAlign:'right',color:'#475569',fontSize:8,fontWeight:700}}>ACTUAL CF</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {cfMonths.map(mk => {
+                            const actual = f.actualCF?.[mk];
+                            return (
+                              <tr key={mk} style={{borderBottom:'1px solid #0b1120'}}>
+                                <td style={{padding:'4px 8px',color:'#94a3b8'}}>{mk}</td>
+                                <td style={{padding:'4px 8px',textAlign:'right',color:'#475569'}}>
+                                {f.indexFund ? (()=>{
+                                  const fStartM = parseDate(f.startDate);
+                                  const fsmIdx = (fStartM.getFullYear()-parseDate(startDate).getFullYear())*12+(fStartM.getMonth()-parseDate(startDate).getMonth());
+                                  const mkParts = mk.split('-').map(Number);
+                                  const mkIdx = (mkParts[0]-parseDate(startDate).getFullYear())*12+(mkParts[1]-1-parseDate(startDate).getMonth());
+                                  const flipMo = mkIdx - fsmIdx;
+                                  const nets = calcIndexFundNetPmt(f.amount, pmt, Math.round(f.durationYears*12));
+                                  const net = flipMo > 0 && flipMo <= nets.length ? nets[flipMo-1] : pmt;
+                                  return <span>{fmt(pmt)} <span style={{color:'#f97316',fontSize:8}}>(net {fmt(net)})</span></span>;
+                                })() : fmt(pmt)}
+                              </td>
+                                <td style={{padding:'4px 8px',textAlign:'right'}}>
+                                  <input type="number" value={actual??''} placeholder={Math.round(pmt).toString()}
+                                    onChange={e => updateFlipCF(f.id, mk, e.target.value ? parseFloat(e.target.value) : null)}
+                                    style={{background:'#020617',border:'1px solid #1e293b',borderRadius:4,color: actual!=null?'#22c55e':'#334155',
+                                      padding:'3px 6px',width:90,textAlign:'right',fontSize:10,fontFamily:'var(--m)',outline:'none'}}
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {trackedFlips.length === 0 && (
+              <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:30,textAlign:'center'}}>
+                <div style={{fontSize:11,color:'#475569',fontFamily:'var(--m)'}}>No flips tracked yet. Add your first flip above to start tracking actuals.</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ DETAIL TABLE ═══ */}
+        {tab==="detail"&&(
+          <div className="fi">
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,overflow:'hidden'}}>
+              <div style={{padding:'12px 16px',borderBottom:'1px solid #1e293b',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+                <h3 style={{fontSize:12,fontWeight:700,fontFamily:'var(--m)'}}>Actuals + Forecast</h3>
+                <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                  <div style={{display:'flex',background:'#020617',borderRadius:5,border:'1px solid #1e293b',overflow:'hidden'}}>
+                    {[['default','Default'],['10yr','10yr'],['20yr','20yr'],['30yr','30yr'],['all','All']].map(([k,l])=>(
+                      <button key={k} onClick={()=>setDetailRange(k)} style={{
+                        padding:'4px 8px',fontSize:9,fontWeight:600,fontFamily:'var(--m)',border:'none',cursor:'pointer',
+                        background:detailRange===k?'#06b6d4':'transparent',color:detailRange===k?'#020617':'#64748b',
+                      }}>{l}</button>
+                    ))}
+                  </div>
+                  <button onClick={()=>{
+                    const headers = ['Month','Date','Source','Flip#','Personal Cash','Asset CF','W/D Out','LOC Balance','Active Flips'];
+                    const csvRows = tRows.map(r => [
+                      r.month, r.date ? `${r.date.getFullYear()}-${String(r.date.getMonth()+1).padStart(2,'0')}` : '',
+                      r.source||'forecast', r.flipNumber, Math.round(r.personalCash||0), Math.round(r.assetCF||0),
+                      Math.round(r.monthlyWithdrawalOut||0), Math.round(r.locBalance||0), r.activeFlipCount||0,
+                    ].join(','));
+                    const csv = [headers.join(','), ...csvRows].join('\n');
+                    const blob = new Blob([csv], {type:'text/csv'});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = `cashflow-detail-${new Date().toISOString().slice(0,10)}.csv`;
+                    a.click(); URL.revokeObjectURL(url);
+                  }} style={{padding:'4px 10px',fontSize:9,fontWeight:600,fontFamily:'var(--m)',border:'1px solid #1e293b',
+                    borderRadius:5,background:'#020617',color:'#64748b',cursor:'pointer'}}>
+                    Export CSV
+                  </button>
+                  <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)'}}>
+                    <span style={{color:'#22c55e'}}>● actual</span> <span style={{color:'#64748b'}}>● forecast</span> · {tRows.length} months
+                  </div>
+                </div>
+              </div>
+              <div style={{overflowX:'auto',maxHeight:detailRange==='all'||detailRange==='30yr'?'none':600}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:'var(--m)'}}>
+                  <thead>
+                    <tr style={{borderBottom:'2px solid #1e293b',position:'sticky',top:0,background:'#0f172a',zIndex:1}}>
+                      {['','Date','Flip#','Personal','Asset CF','W/D Out','LOC','Active'].map(h=>(
+                        <th key={h} style={{padding:'7px 8px',textAlign:'right',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tRows.map((r,i) => {
+                      const isFree = freeMonth != null && r.month === freeMonth;
+                      const isActual = r.source === 'actual';
+                      return (
+                        <tr key={i} className="tb" style={{
+                          borderBottom:'1px solid #0b1120',
+                          background: isFree?'rgba(34,197,94,.07)':isActual?'rgba(6,182,212,.03)':'transparent',
+                        }}>
+                          <td style={{padding:'6px 6px',textAlign:'center',width:8}}>
+                            <div style={{width:6,height:6,borderRadius:'50%',background:isActual?'#22c55e':'#334155',margin:'0 auto'}}/>
+                          </td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:isFree?'#22c55e':'#94a3b8',fontWeight:isFree?700:400}}>
+                            {fmtDate(r.date)}{isFree&&' 🎯'}
+                          </td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:'#06b6d4'}}>{r.flipNumber}</td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:r.personalCash>0?'#f59e0b':'#334155'}}>{r.personalCash>0?fmt(r.personalCash):'$0'}</td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:'#22d3ee',fontWeight:600}}>{fmt(r.assetCF)}</td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:r.monthlyWithdrawalOut>0?'#f87171':'#1e293b'}}>
+                            {r.monthlyWithdrawalOut>0?'-'+fmt(r.monthlyWithdrawalOut):'—'}
+                          </td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:r.locBalance>100?'#ef4444':'#22c55e'}}>{r.locBalance<=0?'$0':fmt(r.locBalance)}</td>
+                          <td style={{padding:'6px 8px',textAlign:'right',color:'#475569'}}>{r.activeFlipCount}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ SETTINGS ═══ */}
+        {tab==="settings"&&(
+          <div className="fi" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:16}}>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18}}>
+              <h3 style={{fontSize:12,fontWeight:700,color:'#06b6d4',marginBottom:14,fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>◇ Core</h3>
+              <Inp label="Start Date" value={startDate} onChange={setStartDate} type="text" note="YYYY-MM-DD" small/>
+              <Inp label="Monthly Personal Cash" value={monthlyPersonalCash} onChange={setMonthlyPersonalCash} pre="$" step={100} small/>
+              <Inp label="Starting Flip Amount" value={startingFlipAmount} onChange={setStartingFlipAmount} pre="$" step={500} small/>
+              <Inp label="Max Flip Size" value={maxFlipSize} onChange={setMaxFlipSize} pre="$" step={10000} small/>
+            </div>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18}}>
+              <h3 style={{fontSize:12,fontWeight:700,color:'#a78bfa',marginBottom:14,fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>💰 Withdrawal & Rates</h3>
+              <Inp label="Desired Monthly Withdrawal" value={desiredMonthlyWithdrawal} onChange={setDesiredMonthlyWithdrawal} pre="$" step={500} small/>
+              <Inp label="Default Yield" value={defaultYield} onChange={setDefaultYield} suf="%" step={0.5} small/>
+              <Inp label="LOC Interest Rate" value={locInterestRate} onChange={setLocInterestRate} suf="%" step={0.25} small/>
+              <div style={{marginTop:10,padding:10,background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',lineHeight:1.5}}>
+                  Freedom = earliest month where you can stop contributing, withdraw desired amount, and flips sustain indefinitely
+                </div>
+              </div>
+            </div>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18}}>
+              <h3 style={{fontSize:12,fontWeight:700,color:'#f59e0b',marginBottom:14,fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>🔄 Flip Structure</h3>
+              <Inp label="Flip Duration" value={flipDurationYears} onChange={setFlipDurationYears} suf="yrs" step={0.5} small/>
+              <Inp label="Flips Per Amount" value={flipsPerAmount} onChange={setFlipsPerAmount} step={1} small/>
+              <Inp label="Growth Multiplier" value={growthMultiplier} onChange={setGrowthMultiplier} suf="×" step={0.1} small/>
+              <Inp label="Stale Threshold" value={staleThreshold} onChange={setStaleThreshold} suf="mo" step={1} small/>
+            </div>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18}}>
+              <h3 style={{fontSize:12,fontWeight:700,color:'#f59e0b',marginBottom:14,fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>🏦 401k & Index</h3>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b',cursor:'pointer'}} onClick={()=>setInclude401k(!include401k)}>
+                <div style={{width:36,height:20,borderRadius:10,background:include401k?'#06b6d4':'#334155',position:'relative',transition:'background .2s'}}>
+                  <div style={{width:16,height:16,borderRadius:'50%',background:'#fff',position:'absolute',top:2,left:include401k?18:2,transition:'left .2s'}}/>
+                </div>
+                <span style={{fontSize:10,fontWeight:600,color:include401k?'#e2e8f0':'#64748b',fontFamily:'var(--m)'}}>Include 401k in calculations</span>
+              </div>
+              <Inp label="Current Age" value={currentAge} onChange={setCurrentAge} step={1} small/>
+              <Inp label="Retirement Age" value={retirementAge} onChange={setRetirementAge} step={1} small/>
+              <Inp label="Current 401k" value={current401k} onChange={setCurrent401k} pre="$" step={1000} small/>
+              <Inp label="Monthly 401k" value={monthly401kContrib} onChange={setMonthly401kContrib} pre="$" step={50} small/>
+              <Inp label="401k Yield" value={annual401kYield} onChange={setAnnual401kYield} suf="%" step={0.5} small/>
+              <Inp label="Index Return" value={indexFundReturn} onChange={setIndexFundReturn} suf="%" step={0.5} small/>
+            </div>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18}}>
+              <h3 style={{fontSize:12,fontWeight:700,color:'#ef4444',marginBottom:14,fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>💾 Data Management</h3>
+              <div style={{marginBottom:14,padding:12,background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',background:signedIn?'#22c55e':'#ef4444'}}/>
+                    <span style={{fontSize:10,fontWeight:600,color:signedIn?'#22c55e':'#94a3b8',fontFamily:'var(--m)'}}>
+                      {signedIn ? 'Google Sheets Connected' : 'Google Sheets Not Connected'}
+                    </span>
+                  </div>
+                  {signedIn
+                    ? <Btn onClick={onSignOut} color="#ef4444" small>Sign Out</Btn>
+                    : <Btn onClick={onSignIn} color="#22c55e" small>Sign In with Google</Btn>
+                  }
+                </div>
+                <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',lineHeight:1.5}}>
+                  {signedIn
+                    ? 'Data saves to Google Sheets automatically and syncs across all devices.'
+                    : 'Sign in to sync data across devices via Google Sheets. Data also saves locally as backup.'}
+                </div>
+              </div>
+              <p style={{fontSize:10,color:'#64748b',fontFamily:'var(--m)',marginBottom:14,lineHeight:1.6}}>
+                Export your data to transfer between artifact versions, or import a previous backup.
+              </p>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
+                <Btn onClick={()=>{
+                  try {
+                    const data = JSON.stringify({ settings: {
+                      startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal,
+                      maxFlipSize, defaultYield, locInterestRate, flipDurationYears,
+                      flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge,
+                      current401k, include401k, monthly401kContrib, annual401kYield, indexFundReturn,
+                    }, actuals, flips: trackedFlips }, null, 2);
+                    setExportData(data);
+                  } catch(e) { setExportData('Error: ' + e.message); }
+                }} color="#06b6d4">Export All Data</Btn>
+                <Btn onClick={()=>setShowImport(!showImport)} color="#f59e0b">{showImport ? 'Cancel Import' : 'Import Data'}</Btn>
+              </div>
+              {exportData && (
+                <div style={{marginBottom:14}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                    <span style={{fontSize:9,color:'#22c55e',fontFamily:'var(--m)'}}>Copy the text below and save it, or paste into the import on another device:</span>
+                    <Btn onClick={()=>{navigator.clipboard.writeText(exportData).catch(()=>{});}} color="#06b6d4" small>Copy</Btn>
+                  </div>
+                  <textarea readOnly value={exportData} style={{width:'100%',height:120,background:'#020617',border:'1px solid #1e293b',borderRadius:6,color:'#94a3b8',fontSize:9,fontFamily:'var(--m)',padding:8,resize:'vertical',outline:'none'}}
+                    onClick={e=>e.target.select()}/>
+                  <div style={{marginTop:4}}><Btn onClick={()=>setExportData(null)} color="#475569" small>Close</Btn></div>
+                </div>
+              )}
+              {showImport && (
+                <div style={{marginBottom:14}}>
+                  <div style={{fontSize:9,color:'#f59e0b',fontFamily:'var(--m)',marginBottom:6}}>Paste your exported data below:</div>
+                  <textarea value={importData} onChange={e=>setImportData(e.target.value)} placeholder="Paste exported JSON here..."
+                    style={{width:'100%',height:120,background:'#020617',border:'1px solid #1e293b',borderRadius:6,color:'#e2e8f0',fontSize:9,fontFamily:'var(--m)',padding:8,resize:'vertical',outline:'none'}}/>
+                  <div style={{marginTop:6}}>
+                    <Btn onClick={()=>{
+                      try {
+                        const data = JSON.parse(importData);
+                        if (data.settings) {
+                          const s = data.settings;
+                          if (s.startDate) setStartDate(s.startDate);
+                          if (s.monthlyPersonalCash != null) setMonthlyPersonalCash(s.monthlyPersonalCash);
+                          if (s.startingFlipAmount != null) setStartingFlipAmount(s.startingFlipAmount);
+                          if (s.desiredMonthlyWithdrawal != null) setDesiredMonthlyWithdrawal(s.desiredMonthlyWithdrawal);
+                          if (s.maxFlipSize != null) setMaxFlipSize(s.maxFlipSize);
+                          if (s.defaultYield != null) setDefaultYield(s.defaultYield);
+                          if (s.locInterestRate != null) setLocInterestRate(s.locInterestRate);
+                          if (s.flipDurationYears != null) setFlipDurationYears(s.flipDurationYears);
+                          if (s.flipsPerAmount != null) setFlipsPerAmount(s.flipsPerAmount);
+                          if (s.growthMultiplier != null) setGrowthMultiplier(s.growthMultiplier);
+                          if (s.staleThreshold != null) setStaleThreshold(s.staleThreshold);
+                          if (s.currentAge != null) setCurrentAge(s.currentAge);
+                          if (s.retirementAge != null) setRetirementAge(s.retirementAge);
+                          if (s.current401k != null) setCurrent401k(s.current401k);
+                          if (s.include401k != null) setInclude401k(s.include401k);
+                          if (s.monthly401kContrib != null) setMonthly401kContrib(s.monthly401kContrib);
+                          if (s.annual401kYield != null) setAnnual401kYield(s.annual401kYield);
+                          if (s.indexFundReturn != null) setIndexFundReturn(s.indexFundReturn);
+                          saveSettings(s);
+                        }
+                        if (data.actuals) { setActuals(data.actuals); saveActuals(data.actuals); }
+                        if (data.flips) { setTrackedFlips(data.flips); saveFlips(data.flips); }
+                        setImportData(''); setShowImport(false);
+                        setExportData(null);
+                      } catch(e) { /* import error */ }
+                    }} color="#22c55e" small>Import</Btn>
+                  </div>
+                </div>
+              )}
+              <Btn onClick={resetAll} color="#ef4444">Reset All Saved Data</Btn>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <footer style={{padding:'12px 20px',borderTop:'1px solid #0f172a',textAlign:'center',fontSize:8,color:'#1e293b',fontFamily:'var(--m)'}}>
+        Cashflow Stacking v4 · Calculator & Tracker · Google Sheets Sync · Not financial advice
+      </footer>
+    </div>
+  );
+}
+
+
+// ═══ App wrapper with Google Auth ═══
+function AppWithAuth() {
+  const [googleReady, setGoogleReady] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
+
+  useEffect(() => {
+    initGoogleApi((authed) => {
+      setSignedIn(authed);
+    }).then(() => {
+      setGoogleReady(true);
+      if (isGoogleSignedIn()) setSignedIn(true);
+    }).catch(e => {
+      console.error('Google API init failed:', e);
+      setGoogleReady(true); // Still allow app to work with localStorage
+    });
+  }, []);
+
+  return React.createElement('div', null,
+    React.createElement(App, { googleReady, signedIn, onSignIn: doSignIn, onSignOut: doSignOut }),
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  React.createElement(AppWithAuth)
+);
+
+</script>
+</body>
+</html>
