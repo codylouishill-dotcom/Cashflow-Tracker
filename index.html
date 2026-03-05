@@ -122,12 +122,11 @@ async function sheetLoadSettings() {
 }
 
 async function sheetSaveFlips(flips) {
-  const header = ['id','name','amount','yield','startDate','durationYears','monthlyPmt','indexFund','actualCF'];
+  const header = ['id','name','amount','startDate','splits_json'];
   const rows = [header, ...flips.map(f => [
-    f.id, f.name, f.amount, f.yield, f.startDate, f.durationYears,
-    f.monthlyPmt, f.indexFund?'true':'false', JSON.stringify(f.actualCF||{}),
+    f.id, f.name, f.amount, f.startDate, JSON.stringify(f.splits || flipSplits(f)),
   ])];
-  await gapi.client.sheets.spreadsheets.values.clear({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.FLIPS+'!A:I' });
+  await gapi.client.sheets.spreadsheets.values.clear({ spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.FLIPS+'!A:E' });
   await gapi.client.sheets.spreadsheets.values.update({
     spreadsheetId: SHEETS_CONFIG.SHEET_ID, range: TABS.FLIPS+'!A1',
     valueInputOption: 'RAW', resource: { values: rows },
@@ -144,7 +143,12 @@ async function sheetLoadFlips() {
       const o = {};
       h.forEach((k, i) => {
         const v = row[i] || '';
-        if (['amount','yield','durationYears','monthlyPmt'].includes(k)) o[k] = parseFloat(v)||0;
+        if (k === 'amount') o[k] = parseFloat(v)||0;
+        else if (k === 'splits_json') {
+          try { o.splits = JSON.parse(v); } catch { o.splits = []; }
+        }
+        // Legacy column support
+        else if (['yield','durationYears','monthlyPmt'].includes(k)) o[k] = parseFloat(v)||0;
         else if (k === 'indexFund') o[k] = v === 'true';
         else if (k === 'actualCF') { try { o[k] = JSON.parse(v); } catch { o[k] = {}; } }
         else o[k] = v;
@@ -233,6 +237,29 @@ function calcIndexFundNetPmt(principal, grossPmt, durationMonths) {
 function avgIndexFundNetPmt(principal, grossPmt, durationMonths) {
   const nets = calcIndexFundNetPmt(principal, grossPmt, durationMonths);
   return nets.reduce((s,v) => s+v, 0) / nets.length;
+}
+
+
+// Get combined monthly payment for a flip (handles splits)
+function flipTotalPmt(f) {
+  if (f.splits && f.splits.length > 0) {
+    return f.splits.reduce((sum, s) => sum + (s.monthlyPmt || monthlyPmt(s.amount, (s.yield||8)/100, s.durationYears)), 0);
+  }
+  return f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears);
+}
+
+// Get splits array (returns single-element array for non-split flips)
+function flipSplits(f) {
+  if (f.splits && f.splits.length > 0) return f.splits;
+  return [{ id: f.id, name: 'Main', amount: f.amount, yield: f.yield, durationYears: f.durationYears,
+    monthlyPmt: f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears),
+    indexFund: f.indexFund || false, actualCF: f.actualCF || {} }];
+}
+
+// Get the max duration across all splits
+function flipMaxDuration(f) {
+  if (f.splits && f.splits.length > 0) return Math.max(...f.splits.map(s => s.durationYears));
+  return f.durationYears;
 }
 
 /* ══ STORAGE LAYER ══ */
@@ -686,24 +713,27 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       const personalCash = a.personalCash ?? 0;
       const withdrawal = a.withdrawal || 0;
 
-      // Compute asset CF from tracked flips for this month
+      // Compute asset CF from tracked flips (split-aware)
       let assetCF = 0;
       for (const f of trackedFlips) {
-        const cfOverride = f.actualCF?.[mk];
-        if (cfOverride != null) {
-          assetCF += cfOverride;
-        } else {
-          const fStart = parseDate(f.startDate);
-          const fStartMonth = (fStart.getFullYear() - sd.getFullYear()) * 12 + (fStart.getMonth() - sd.getMonth());
-          const fEndMonth = fStartMonth + Math.round(f.durationYears * 12);
-          if (monthIdx > fStartMonth && monthIdx <= fEndMonth) {
-            const grossPmt = f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears);
-            if (f.indexFund) {
-              const flipMonth = monthIdx - fStartMonth;
-              const nets = calcIndexFundNetPmt(f.amount, grossPmt, Math.round(f.durationYears * 12));
-              assetCF += (flipMonth > 0 && flipMonth <= nets.length) ? nets[flipMonth - 1] : grossPmt;
-            } else {
-              assetCF += grossPmt;
+        const fStart = parseDate(f.startDate);
+        const fStartMonth = (fStart.getFullYear() - sd.getFullYear()) * 12 + (fStart.getMonth() - sd.getMonth());
+        const splits = flipSplits(f);
+        for (const sp of splits) {
+          const cfOverride = sp.actualCF?.[mk];
+          if (cfOverride != null) {
+            assetCF += cfOverride;
+          } else {
+            const fEndMonth = fStartMonth + Math.round(sp.durationYears * 12);
+            if (monthIdx > fStartMonth && monthIdx <= fEndMonth) {
+              const grossPmt = sp.monthlyPmt || monthlyPmt(sp.amount, (sp.yield||8)/100, sp.durationYears);
+              if (sp.indexFund) {
+                const flipMonth = monthIdx - fStartMonth;
+                const nets = calcIndexFundNetPmt(sp.amount, grossPmt, Math.round(sp.durationYears * 12));
+                assetCF += (flipMonth > 0 && flipMonth <= nets.length) ? nets[flipMonth - 1] : grossPmt;
+              } else {
+                assetCF += grossPmt;
+              }
             }
           }
         }
@@ -754,9 +784,11 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
         const fsm = (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
         return {
           id: f.id, startMonth: fsm, amount: f.amount,
-          pmt: f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears),
-          yield: (f.yield||8)/100, endMonth: fsm + Math.round(f.durationYears*12),
-          indexFund: f.indexFund || false, source: 'actual',
+          pmt: flipTotalPmt(f),
+          yield: (f.yield || (f.splits?.[0]?.yield) || 8)/100,
+          endMonth: fsm + Math.round(flipMaxDuration(f)*12),
+          indexFund: (f.indexFund || (f.splits && f.splits.some(s=>s.indexFund))) || false,
+          source: 'actual', amount: f.amount,
         };
       });
 
@@ -797,9 +829,11 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
         const fsm = (fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());
         return {
           id: f.id, startMonth: fsm, amount: f.amount,
-          pmt: f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears),
-          yield: (f.yield||8)/100, endMonth: fsm + Math.round(f.durationYears*12),
-          indexFund: f.indexFund || false, source: 'actual',
+          pmt: flipTotalPmt(f),
+          yield: (f.yield || (f.splits?.[0]?.yield) || 8)/100,
+          endMonth: fsm + Math.round(flipMaxDuration(f)*12),
+          indexFund: (f.indexFund || (f.splits && f.splits.some(s=>s.indexFund))) || false,
+          source: 'actual', amount: f.amount,
         };
       });
 
@@ -920,11 +954,56 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     persistActuals(next);
   };
 
-  const updateFlipCF = (flipId, mk, value) => {
-    const next = trackedFlips.map(f => f.id === flipId
-      ? { ...f, actualCF: { ...(f.actualCF||{}), [mk]: value } }
-      : f
-    );
+  const updateFlipCF = (flipId, splitId, mk, value) => {
+    const next = trackedFlips.map(f => {
+      if (f.id !== flipId) return f;
+      if (f.splits) {
+        return { ...f, splits: f.splits.map(s => s.id === splitId
+          ? { ...s, actualCF: { ...(s.actualCF||{}), [mk]: value } } : s) };
+      }
+      // Legacy: no splits
+      return { ...f, actualCF: { ...(f.actualCF||{}), [mk]: value } };
+    });
+    persistFlips(next);
+  };
+
+  // Add a split to a flip
+  const addSplit = (flipId) => {
+    const next = trackedFlips.map(f => {
+      if (f.id !== flipId) return f;
+      const splits = flipSplits(f);
+      const newSplit = { id: uid(), name: `Split ${splits.length + 1}`, amount: 0,
+        yield: 8, durationYears: 3, monthlyPmt: 0, indexFund: false, actualCF: {} };
+      return { ...f, splits: [...splits, newSplit] };
+    });
+    persistFlips(next);
+  };
+
+  // Remove a split from a flip
+  const removeSplit = (flipId, splitId) => {
+    const next = trackedFlips.map(f => {
+      if (f.id !== flipId || !f.splits) return f;
+      const newSplits = f.splits.filter(s => s.id !== splitId);
+      if (newSplits.length === 0) return f; // Don't remove last split
+      return { ...f, splits: newSplits, amount: newSplits.reduce((s,sp) => s + sp.amount, 0) };
+    });
+    persistFlips(next);
+  };
+
+  // Update a split's field
+  const updateSplit = (flipId, splitId, field, value) => {
+    const next = trackedFlips.map(f => {
+      if (f.id !== flipId) return f;
+      const splits = (f.splits || flipSplits(f)).map(s => {
+        if (s.id !== splitId) return s;
+        const updated = { ...s, [field]: value };
+        if (['amount','yield','durationYears'].includes(field)) {
+          updated.monthlyPmt = monthlyPmt(updated.amount, (updated.yield||8)/100, updated.durationYears);
+        }
+        return updated;
+      });
+      return { ...f, splits, amount: splits.reduce((sum,s) => sum + s.amount, 0) };
+    });
     persistFlips(next);
   };
 
@@ -932,11 +1011,14 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     if (!newFlipForm.name || !newFlipForm.startDate) return;
     const f = {
       id: uid(), name: newFlipForm.name, amount: newFlipForm.amount,
-      yield: newFlipForm.yield, startDate: newFlipForm.startDate,
-      durationYears: newFlipForm.durationYears,
-      monthlyPmt: monthlyPmt(newFlipForm.amount, newFlipForm.yield/100, newFlipForm.durationYears),
-      indexFund: newFlipForm.indexFund || false,
-      actualCF: {},
+      startDate: newFlipForm.startDate,
+      // Default single split with all the details
+      splits: [{
+        id: uid(), name: 'Main', amount: newFlipForm.amount,
+        yield: newFlipForm.yield, durationYears: newFlipForm.durationYears,
+        monthlyPmt: monthlyPmt(newFlipForm.amount, newFlipForm.yield/100, newFlipForm.durationYears),
+        indexFund: newFlipForm.indexFund || false, actualCF: {},
+      }],
     };
     persistFlips([...trackedFlips, f]);
     setNewFlipForm({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false });
@@ -1174,9 +1256,10 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
 
             {/* Tracked flips list */}
             {trackedFlips.map(f => {
-              const pmt = f.monthlyPmt || monthlyPmt(f.amount, (f.yield||8)/100, f.durationYears);
+              const splits = flipSplits(f);
+              const pmt = flipTotalPmt(f);
               const fStart = parseDate(f.startDate);
-              const fEnd = addMo(fStart, Math.round(f.durationYears * 12));
+              const fEnd = addMo(fStart, Math.round(flipMaxDuration(f) * 12));
               const cfMonths = [];
               for (let d = addMo(fStart, 1); d <= fEnd && d <= today; d = addMo(d, 1)) {
                 cfMonths.push(moKey(d));
@@ -1187,48 +1270,125 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,flexWrap:'wrap',gap:8}}>
                     {editingFlipId===f.id ? (
                       <div style={{flex:1}}>
-                        <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end',marginBottom:8}}>
-                          <Inp label="Name" value={f.name} onChange={v=>updateFlip(f.id,'name',v)} type="text" small style={{flex:'1 1 120px'}}/>
-                          <Inp label="Amount" value={f.amount} onChange={v=>updateFlip(f.id,'amount',v)} pre="$" step={500} small style={{flex:'1 1 100px'}}/>
-                          <Inp label="Yield" value={f.yield} onChange={v=>updateFlip(f.id,'yield',v)} suf="%" step={0.5} small style={{flex:'0 0 80px'}}/>
-                          <Inp label="Start Date" value={f.startDate} onChange={v=>updateFlip(f.id,'startDate',v)} type="text" note="YYYY-MM-DD" small style={{flex:'1 1 120px'}}/>
-                          <Inp label="Duration" value={f.durationYears} onChange={v=>updateFlip(f.id,'durationYears',v)} suf="yrs" step={0.5} small style={{flex:'0 0 80px'}}/>
-                          <div style={{flex:'0 0 auto',marginBottom:8,display:'flex',alignItems:'flex-end',paddingBottom:2}}>
-                            <div style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',padding:'6px 0'}} onClick={()=>updateFlip(f.id,'indexFund',!f.indexFund)}>
-                              <div style={{width:16,height:16,borderRadius:3,border:'1px solid '+(f.indexFund?'#f97316':'#334155'),background:f.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                                {f.indexFund&&<span style={{color:'#fff',fontSize:10,lineHeight:1}}>\u2713</span>}
-                              </div>
-                              <span style={{fontSize:9,color:f.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>Index Fund</span>
-                            </div>
-                          </div>
+                        <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end',marginBottom:10}}>
+                          <Inp label="Flip Name" value={f.name} onChange={v=>updateFlip(f.id,'name',v)} type="text" small style={{flex:'1 1 140px'}}/>
+                          <Inp label="Start Date" value={f.startDate} onChange={v=>updateFlip(f.id,'startDate',v)} type="text" note="YYYY-MM-DD" small style={{flex:'1 1 130px'}}/>
+                          <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginBottom:8,paddingBottom:4}}>Total: {fmt(f.amount)}</div>
                         </div>
-                        <div style={{display:'flex',gap:6}}>
+                        <div style={{fontSize:9,fontWeight:700,color:'#64748b',fontFamily:'var(--m)',textTransform:'uppercase',marginBottom:6}}>Splits</div>
+                        {splits.map((sp,si) => (
+                          <div key={sp.id} style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-end',marginBottom:8,padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                            <Inp label="Name" value={sp.name} onChange={v=>updateSplit(f.id,sp.id,'name',v)} type="text" small style={{flex:'1 1 100px'}}/>
+                            <Inp label="Amount" value={sp.amount} onChange={v=>updateSplit(f.id,sp.id,'amount',v)} pre="$" step={500} small style={{flex:'1 1 90px'}}/>
+                            <Inp label="Yield" value={sp.yield} onChange={v=>updateSplit(f.id,sp.id,'yield',v)} suf="%" step={0.5} small style={{flex:'0 0 70px'}}/>
+                            <Inp label="Duration" value={sp.durationYears} onChange={v=>updateSplit(f.id,sp.id,'durationYears',v)} suf="yrs" step={0.5} small style={{flex:'0 0 70px'}}/>
+                            <div style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',marginBottom:8,paddingBottom:4}} onClick={()=>updateSplit(f.id,sp.id,'indexFund',!sp.indexFund)}>
+                              <div style={{width:14,height:14,borderRadius:3,border:'1px solid '+(sp.indexFund?'#f97316':'#334155'),background:sp.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                                {sp.indexFund&&<span style={{color:'#fff',fontSize:9,lineHeight:1}}>\u2713</span>}
+                              </div>
+                              <span style={{fontSize:8,color:sp.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>IDX</span>
+                            </div>
+                            {splits.length > 1 && <Btn onClick={()=>removeSplit(f.id,sp.id)} color="#ef4444" small>\u00d7</Btn>}
+                          </div>
+                        ))}
+                        <div style={{display:'flex',gap:6,marginTop:4}}>
+                          <Btn onClick={()=>addSplit(f.id)} color="#f59e0b" small>+ Add Split</Btn>
                           <Btn onClick={()=>setEditingFlipId(null)} color="#22c55e" small>Done</Btn>
-                          <Btn onClick={()=>removeFlip(f.id)} color="#ef4444" small>Remove</Btn>
+                          <Btn onClick={()=>removeFlip(f.id)} color="#ef4444" small>Remove Flip</Btn>
                         </div>
                       </div>
                     ) : (
                       <>
-                        <div>
-                          <div style={{display:'flex',alignItems:'center',gap:8}}>
-                            <h4 style={{fontSize:14,fontWeight:700,color:'#06b6d4'}}>{f.name || `Flip ${f.id.slice(0,4)}`}</h4>
-                            {f.indexFund && <span style={{fontSize:8,padding:'2px 6px',borderRadius:4,background:'rgba(249,115,22,.15)',color:'#f97316',fontWeight:700,fontFamily:'var(--m)'}}>INDEX FUND</span>}
+                        <div style={{flex:1}}>
+                          <div style={{display:'flex',alignItems:'center',gap:8,justifyContent:'space-between',flexWrap:'wrap'}}>
+                            <div style={{display:'flex',alignItems:'center',gap:8}}>
+                              <h4 style={{fontSize:14,fontWeight:700,color:'#06b6d4'}}>{f.name || `Flip ${f.id.slice(0,4)}`}</h4>
+                              {splits.length > 1 && <span style={{fontSize:8,padding:'2px 6px',borderRadius:4,background:'rgba(6,182,212,.15)',color:'#06b6d4',fontWeight:700,fontFamily:'var(--m)'}}>{splits.length} SPLITS</span>}
+                            </div>
+                            <div style={{display:'flex',gap:6}}>
+                              <Btn onClick={()=>setEditingFlipId(f.id)} color="#06b6d4" small>Edit</Btn>
+                              <Btn onClick={()=>removeFlip(f.id)} color="#ef4444" small>Remove</Btn>
+                            </div>
                           </div>
                           <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>
-                            {fmt(f.amount)} @ {f.yield}% · {f.durationYears}yr · {fmtDate(fStart)} → {fmtDate(fEnd)} · Pmt: {fmt(pmt)}/mo
-                            {f.indexFund && <span style={{color:'#f97316'}}> · Net: {fmt(avgIndexFundNetPmt(f.amount, pmt, Math.round(f.durationYears*12)))}/mo after tax</span>}
+                            {fmt(f.amount)} total · {fmtDate(fStart)} · Combined Pmt: {fmt(pmt)}/mo
                           </div>
-                        </div>
-                        <div style={{display:'flex',gap:6}}>
-                          <Btn onClick={()=>setEditingFlipId(f.id)} color="#06b6d4" small>Edit</Btn>
-                          <Btn onClick={()=>removeFlip(f.id)} color="#ef4444" small>Remove</Btn>
+                          {splits.length > 1 && (
+                            <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>
+                              {splits.map(sp => (
+                                <div key={sp.id} style={{fontSize:9,padding:'3px 8px',borderRadius:4,background:'#020617',border:'1px solid #1e293b',fontFamily:'var(--m)',color:'#94a3b8'}}>
+                                  {sp.name}: {fmt(sp.amount)} @ {sp.yield}% · {sp.durationYears}yr
+                                  {sp.indexFund && <span style={{color:'#f97316'}}> · IDX</span>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {splits.length === 1 && (
+                            <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginTop:1}}>
+                              @ {splits[0].yield}% · {splits[0].durationYears}yr
+                              {splits[0].indexFund && <span style={{color:'#f97316'}}> · Index Fund · Net: {fmt(avgIndexFundNetPmt(splits[0].amount, pmt, Math.round(splits[0].durationYears*12)))}/mo</span>}
+                            </div>
+                          )}
                         </div>
                       </>
                     )}
                   </div>
 
                   {/* Monthly CF tracking for this flip */}
-                  {cfMonths.length > 0 && (
+                  {cfMonths.length > 0 && (()=>{
+                    let totalExpected = 0, totalActual = 0;
+                    for (const mk of cfMonths) {
+                      let moExpected = 0, moActual = 0;
+                      for (const sp of splits) {
+                        const spPmt = sp.monthlyPmt || monthlyPmt(sp.amount, (sp.yield||8)/100, sp.durationYears);
+                        const spEnd = Math.round(sp.durationYears * 12);
+                        const fStartParsed = parseDate(f.startDate);
+                        const mkParts = mk.split('-').map(Number);
+                        const moIdx = (mkParts[0]-fStartParsed.getFullYear())*12+(mkParts[1]-1-fStartParsed.getMonth());
+                        if (moIdx > 0 && moIdx <= spEnd) {
+                          moExpected += spPmt;
+                          const act = sp.actualCF?.[mk];
+                          moActual += act != null ? act : spPmt;
+                        }
+                      }
+                      totalExpected += moExpected;
+                      totalActual += moActual;
+                    }
+                    const diff = totalActual - totalExpected;
+                    const diffPct = totalExpected > 0 ? (diff / totalExpected * 100) : 0;
+                    return (<div>
+                    <div style={{display:'flex',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+                      <div style={{flex:'1 1 120px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:3}}>Expected to Date</div>
+                        <div style={{fontSize:16,fontWeight:800,color:'#06b6d4',fontFamily:'var(--m)'}}>{fmt(totalExpected)}</div>
+                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{cfMonths.length} months × {fmt(pmt)}</div>
+                      </div>
+                      <div style={{flex:'1 1 120px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:3}}>Actual to Date</div>
+                        <div style={{fontSize:16,fontWeight:800,color:'#22c55e',fontFamily:'var(--m)'}}>{fmt(totalActual)}</div>
+                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{cfMonths.filter(mk=>f.actualCF?.[mk]!=null).length} of {cfMonths.length} months recorded</div>
+                      </div>
+                      <div style={{flex:'1 1 120px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid '+(diff>=0?'rgba(34,197,94,.2)':'rgba(239,68,68,.2)')}}>
+                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:3}}>Difference</div>
+                        <div style={{fontSize:16,fontWeight:800,color:diff>=0?'#22c55e':'#ef4444',fontFamily:'var(--m)'}}>{diff>=0?'+':''}{fmt(diff)}</div>
+                        <div style={{fontSize:8,color:diff>=0?'#22c55e':'#ef4444',fontFamily:'var(--m)'}}>{diff>=0?'+':''}{diffPct.toFixed(1)}% vs expected</div>
+                      </div>
+                      {(()=>{
+                        const totalOwed = splits.reduce((s,sp) => s + (sp.monthlyPmt || monthlyPmt(sp.amount,(sp.yield||8)/100,sp.durationYears)) * Math.round(sp.durationYears*12), 0);
+                        const remaining = totalOwed - totalActual;
+                        const pctComplete = totalOwed > 0 ? (totalActual / totalOwed * 100) : 0;
+                        return (
+                          <div style={{flex:'1 1 120px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                            <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:3}}>Remaining</div>
+                            <div style={{fontSize:16,fontWeight:800,color:'#f59e0b',fontFamily:'var(--m)'}}>{fmt(Math.max(0, remaining))}</div>
+                            <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{pctComplete.toFixed(1)}% of {fmt(totalOwed)} received</div>
+                            <div style={{marginTop:4,height:3,background:'#1e293b',borderRadius:2,overflow:'hidden'}}>
+                              <div style={{height:'100%',background:'#f59e0b',borderRadius:2,width:Math.min(100,pctComplete)+'%',transition:'width .3s'}}/>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
                     <div style={{overflowX:'auto'}}>
                       <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:'var(--m)'}}>
                         <thead>
@@ -1240,36 +1400,39 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                         </thead>
                         <tbody>
                           {cfMonths.map(mk => {
-                            const actual = f.actualCF?.[mk];
                             return (
                               <tr key={mk} style={{borderBottom:'1px solid #0b1120'}}>
                                 <td style={{padding:'4px 8px',color:'#94a3b8'}}>{mk}</td>
-                                <td style={{padding:'4px 8px',textAlign:'right',color:'#475569'}}>
-                                {f.indexFund ? (()=>{
-                                  const fStartM = parseDate(f.startDate);
-                                  const fsmIdx = (fStartM.getFullYear()-parseDate(startDate).getFullYear())*12+(fStartM.getMonth()-parseDate(startDate).getMonth());
-                                  const mkParts = mk.split('-').map(Number);
-                                  const mkIdx = (mkParts[0]-parseDate(startDate).getFullYear())*12+(mkParts[1]-1-parseDate(startDate).getMonth());
-                                  const flipMo = mkIdx - fsmIdx;
-                                  const nets = calcIndexFundNetPmt(f.amount, pmt, Math.round(f.durationYears*12));
-                                  const net = flipMo > 0 && flipMo <= nets.length ? nets[flipMo-1] : pmt;
-                                  return <span>{fmt(pmt)} <span style={{color:'#f97316',fontSize:8}}>(net {fmt(net)})</span></span>;
-                                })() : fmt(pmt)}
-                              </td>
-                                <td style={{padding:'4px 8px',textAlign:'right'}}>
-                                  <input type="number" value={actual??''} placeholder={Math.round(pmt).toString()}
-                                    onChange={e => updateFlipCF(f.id, mk, e.target.value ? parseFloat(e.target.value) : null)}
-                                    style={{background:'#020617',border:'1px solid #1e293b',borderRadius:4,color: actual!=null?'#22c55e':'#334155',
-                                      padding:'3px 6px',width:90,textAlign:'right',fontSize:10,fontFamily:'var(--m)',outline:'none'}}
-                                  />
-                                </td>
+                                {splits.map(sp => {
+                                  const spPmt = sp.monthlyPmt || monthlyPmt(sp.amount,(sp.yield||8)/100,sp.durationYears);
+                                  const spEnd = Math.round(sp.durationYears*12);
+                                  const fsp = parseDate(f.startDate);
+                                  const mkP = mk.split('-').map(Number);
+                                  const moIdx = (mkP[0]-fsp.getFullYear())*12+(mkP[1]-1-fsp.getMonth());
+                                  const active = moIdx > 0 && moIdx <= spEnd;
+                                  const actual = sp.actualCF?.[mk];
+                                  return (<React.Fragment key={sp.id}>
+                                    <td style={{padding:'4px 8px',textAlign:'right',color:active?'#475569':'#1e293b'}}>
+                                      {active ? fmt(spPmt) : '—'}
+                                    </td>
+                                    <td style={{padding:'4px 8px',textAlign:'right'}}>
+                                      {active ? (
+                                        <input type="number" value={actual??''} placeholder={Math.round(spPmt).toString()}
+                                          onChange={e => updateFlipCF(f.id, sp.id, mk, e.target.value ? parseFloat(e.target.value) : null)}
+                                          style={{background:'#020617',border:'1px solid #1e293b',borderRadius:4,color:actual!=null?'#22c55e':'#334155',
+                                            padding:'3px 6px',width:80,textAlign:'right',fontSize:10,fontFamily:'var(--m)',outline:'none'}}/>
+                                      ) : <span style={{color:'#1e293b'}}>{'—'}</span>}
+                                    </td>
+                                  </React.Fragment>);
+                                })}
                               </tr>
                             );
                           })}
                         </tbody>
                       </table>
                     </div>
-                  )}
+                    </div>);
+                  })()}
                 </div>
               );
             })}
