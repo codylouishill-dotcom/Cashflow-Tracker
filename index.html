@@ -608,7 +608,34 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     });
   }, []);
 
-  // Auto-save settings
+  // Reload data from Google Sheets when sign-in status changes
+  useEffect(() => {
+    if (!loaded || !signedIn) return;
+    loadData().then(({ settings, actuals: a, flips: f }) => {
+      if (settings && Object.keys(settings).length > 0) {
+        if (settings.startDate) setStartDate(settings.startDate);
+        if (settings.monthlyPersonalCash != null) setMonthlyPersonalCash(settings.monthlyPersonalCash);
+        if (settings.startingFlipAmount != null) setStartingFlipAmount(settings.startingFlipAmount);
+        if (settings.desiredMonthlyWithdrawal != null) setDesiredMonthlyWithdrawal(settings.desiredMonthlyWithdrawal);
+        if (settings.maxFlipSize != null) setMaxFlipSize(settings.maxFlipSize);
+        if (settings.defaultYield != null) setDefaultYield(settings.defaultYield);
+        if (settings.locInterestRate != null) setLocInterestRate(settings.locInterestRate);
+        if (settings.flipDurationYears != null) setFlipDurationYears(settings.flipDurationYears);
+        if (settings.flipsPerAmount != null) setFlipsPerAmount(settings.flipsPerAmount);
+        if (settings.growthMultiplier != null) setGrowthMultiplier(settings.growthMultiplier);
+        if (settings.staleThreshold != null) setStaleThreshold(settings.staleThreshold);
+        if (settings.currentAge != null) setCurrentAge(settings.currentAge);
+        if (settings.retirementAge != null) setRetirementAge(settings.retirementAge);
+        if (settings.current401k != null) setCurrent401k(settings.current401k);
+        if (settings.include401k != null) setInclude401k(settings.include401k);
+        if (settings.monthly401kContrib != null) setMonthly401kContrib(settings.monthly401kContrib);
+        if (settings.annual401kYield != null) setAnnual401kYield(settings.annual401kYield);
+        if (settings.indexFundReturn != null) setIndexFundReturn(settings.indexFundReturn);
+      }
+      if (a && Object.keys(a).length > 0) setActuals(a);
+      if (f && f.length > 0) setTrackedFlips(f);
+    });
+  }, [signedIn]);
   const saveTimer = useRef(null);
   useEffect(() => {
     if (!loaded) return;
@@ -1382,7 +1409,25 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                     </span>
                   </div>
                   {signedIn
-                    ? <Btn onClick={onSignOut} color="#ef4444" small>Sign Out</Btn>
+                    ? <div style={{display:'flex',gap:6}}>
+                        <Btn onClick={async ()=>{
+                          setSaving(true);
+                          try {
+                            await ensureTabs();
+                            const s = { startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal,
+                              maxFlipSize, defaultYield, locInterestRate, flipDurationYears,
+                              flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge,
+                              current401k, include401k, monthly401kContrib, annual401kYield, indexFundReturn };
+                            await Promise.all([
+                              sheetSaveSettings(s),
+                              sheetSaveFlips(trackedFlips),
+                              sheetSaveActuals(actuals),
+                            ]);
+                          } catch(e) { console.error('Sync error:', e); }
+                          setSaving(false);
+                        }} color="#06b6d4" small>Sync Now</Btn>
+                        <Btn onClick={onSignOut} color="#ef4444" small>Sign Out</Btn>
+                      </div>
                     : <Btn onClick={onSignIn} color="#22c55e" small>Sign In with Google</Btn>
                   }
                 </div>
