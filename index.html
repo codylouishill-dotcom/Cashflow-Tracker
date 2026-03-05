@@ -59,8 +59,12 @@ async function initGoogleApi(onAuthChange) {
           if (!resp.error) { _signedIn = true; if (_onAuthChange) _onAuthChange(true); }
         },
       });
-      // Check if already have token
-      if (gapi.client.getToken()) { _signedIn = true; }
+      // Try to silently reconnect if user has previously signed in
+      if (localStorage.getItem('cfs:google_authed')) {
+        try {
+          _tokenClient.requestAccessToken({ prompt: '' });
+        } catch(e) { console.log('Silent re-auth failed:', e); }
+      }
       resolve();
     });
   });
@@ -69,12 +73,14 @@ async function initGoogleApi(onAuthChange) {
 function doSignIn() {
   if (!_tokenClient) return;
   _tokenClient.requestAccessToken({ prompt: gapi.client.getToken() ? '' : 'consent' });
+  localStorage.setItem('cfs:google_authed', 'true');
 }
 
 function doSignOut() {
   const token = gapi.client.getToken();
   if (token) { google.accounts.oauth2.revoke(token.access_token); gapi.client.setToken(''); }
   _signedIn = false;
+  localStorage.removeItem('cfs:google_authed');
   if (_onAuthChange) _onAuthChange(false);
 }
 
