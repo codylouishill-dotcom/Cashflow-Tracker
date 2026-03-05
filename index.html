@@ -1206,9 +1206,9 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                       const hasData = a && (a.personalCash != null);
                       // Compute CF from tracked flips for this month
                       let flipCF = 0;
-                      for (const f of trackedFlips) {
-                        if (f.actualCF?.[mk] != null) flipCF += f.actualCF[mk];
-                      }
+                       for (const f of trackedFlips) {
+                         for (const sp of flipSplits(f)) { if (sp.actualCF?.[mk] != null) flipCF += sp.actualCF[mk]; }
+                       }
                       return (
                         <tr key={mk} className="tb" style={{borderBottom:'1px solid #0b1120',background:hasData?'rgba(6,182,212,.03)':'transparent',cursor:'pointer'}}
                           onClick={()=>setEditMonth(mk)}>
@@ -1366,8 +1366,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                       <div style={{flex:'1 1 120px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
                         <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:3}}>Actual to Date</div>
                         <div style={{fontSize:16,fontWeight:800,color:'#22c55e',fontFamily:'var(--m)'}}>{fmt(totalActual)}</div>
-                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{cfMonths.filter(mk=>f.actualCF?.[mk]!=null).length} of {cfMonths.length} months recorded</div>
-                      </div>
+                        <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{cfMonths.filter(mk=>splits.some(sp=>sp.actualCF?.[mk]!=null)).length} of {cfMonths.length} months recorded</div>
                       <div style={{flex:'1 1 120px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid '+(diff>=0?'rgba(34,197,94,.2)':'rgba(239,68,68,.2)')}}>
                         <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:3}}>Difference</div>
                         <div style={{fontSize:16,fontWeight:800,color:diff>=0?'#22c55e':'#ef4444',fontFamily:'var(--m)'}}>{diff>=0?'+':''}{fmt(diff)}</div>
