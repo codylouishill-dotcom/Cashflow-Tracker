@@ -48,6 +48,25 @@ let _onAuthChange = null;
 
 async function initGoogleApi(onAuthChange) {
   _onAuthChange = onAuthChange;
+  // Wait for gapi and google to be available (loaded async), timeout after 5s
+  await new Promise((resolve) => {
+    let elapsed = 0;
+    const check = () => {
+      if (typeof gapi !== 'undefined' && typeof google !== 'undefined' && google.accounts) {
+        resolve();
+      } else if (elapsed > 5000) {
+        console.warn('Google API scripts not loaded after 5s, continuing without');
+        resolve();
+      } else {
+        elapsed += 100;
+        setTimeout(check, 100);
+      }
+    };
+    check();
+  });
+  if (typeof gapi === 'undefined' || typeof google === 'undefined' || !google.accounts) {
+    return; // Google not available, app will work with localStorage only
+  }
   return new Promise((resolve) => {
     gapi.load('client', async () => {
       await gapi.client.init({ discoveryDocs: [SHEETS_CONFIG.DISCOVERY_DOC] });
