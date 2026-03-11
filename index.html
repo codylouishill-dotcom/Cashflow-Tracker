@@ -1044,7 +1044,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
   const locAvailable = locs.reduce((s, l) => s + Math.max(0, Number(l.creditLimit||0) - Number(l.currentBalance||0)), 0);
   const locBalance = locs.reduce((s, l) => s + Number(l.currentBalance||0), 0);
 
-  const subTabs = [['dashboard','Dashboard'],['policies',`Policies (${policies.length})`],['creditlines',`Credit Lines (${locs.length})`],['projections','Projections'],['borrowable','Borrowable'],['gapanalysis','Gap Analysis']];
+  const subTabs = [['dashboard','Dashboard'],['policies',`Policies (${policies.length})`],['creditlines',`Credit Lines (${locs.length})`],['projections','Projections'],['borrowable','Borrowable']];
 
   return (<div className="fi">
     {/* IBC Sub-navigation */}
@@ -1310,10 +1310,10 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
             const pol = selected[0];
             const data = pol.illustration;
             const sYr = pol.startDate ? ibcParseDate(pol.startDate).getFullYear() : new Date().getFullYear();
-            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th><th>Age</th><th>Premium</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
+            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th><th>Age</th><th>Premium</th><th>Total Premiums</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
               {data.map((r,i)=>{let tp=0;for(let j=0;j<=i;j++)tp+=data[j].premium;const rat=tp>0?((r.ngCV/tp)*100).toFixed(1):'0.0';
                 const calYr = sYr + r.year - 1;
-                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{calYr}</td><td style={{color:'#475569'}}>{r.age}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
+                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{calYr}</td><td style={{color:'#475569'}}>{r.age}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--amber)'}}>{fmt(tp)}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
               })}
             </tbody></table></div>;
           })()}
@@ -1322,12 +1322,17 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
           {!isSingle && (()=>{
             // Build calendar-year-based rows across all selected policies
             const calYearMap = {};
+            const cumPremMap = {}; // per-policy cumulative premiums
             selected.forEach(p => {
               const sYr = p.startDate ? ibcParseDate(p.startDate).getFullYear() : new Date().getFullYear();
+              let cumPrem = 0;
               p.illustration.forEach(r => {
+                cumPrem += r.premium;
                 const calYr = sYr + r.year - 1;
                 if (!calYearMap[calYr]) calYearMap[calYr] = {};
                 calYearMap[calYr][p.id] = r;
+                if (!cumPremMap[calYr]) cumPremMap[calYr] = {};
+                cumPremMap[calYr][p.id] = cumPrem;
               });
             });
             const calYears = Object.keys(calYearMap).map(Number).sort((a,b) => a - b);
@@ -1338,19 +1343,22 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
                 <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} DB</th>
               </React.Fragment>)}
               {selected.length > 1 && <><th>Total CV</th><th>Total DB</th></>}
+              <th>Total Premiums</th>
             </tr></thead><tbody>
               {calYears.map(calYr => {
-                let tCV = 0, tDB = 0;
+                let tCV = 0, tDB = 0, tPrem = 0;
                 const cells = selected.map(p => {
                   const r = calYearMap[calYr]?.[p.id];
                   if (!r) return <React.Fragment key={p.id}><td style={{color:'#475569'}}>—</td><td style={{color:'#475569'}}>—</td></React.Fragment>;
                   tCV += r.ngCV; tDB += r.ngDB;
                   return <React.Fragment key={p.id}><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td></React.Fragment>;
                 });
+                selected.forEach(p => { tPrem += (cumPremMap[calYr]?.[p.id] || 0); });
                 const thisYear = new Date().getFullYear();
                 return <tr key={calYr} style={calYr===thisYear?{background:'rgba(34,197,94,.04)'}:{}}>
                   <td style={{fontWeight:calYr===thisYear?600:400}}>{calYr}{calYr===thisYear?' ←':''}</td>{cells}
                   {selected.length > 1 && <><td style={{color:'var(--green)',fontWeight:600}}>{fmt(tCV)}</td><td style={{color:'var(--purple)',fontWeight:600}}>{fmt(tDB)}</td></>}
+                  <td style={{color:'var(--amber)'}}>{fmt(tPrem)}</td>
                 </tr>;
               })}
             </tbody></table></div>;
@@ -1460,9 +1468,6 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
         </div>}
       </div>}
     </div>}
-
-    {/* ── Gap Analysis (enhanced with flip data) ── */}
-    {subTab==='gapanalysis'&&<IBCGapAnalysis policies={policies} deals={deals} locs={locs} trackedFlips={trackedFlips} combinedRows={combinedRows} addDeal={()=>setShowDealModal(true)} updateDeal={updateDeal} deleteDeal={deleteDeal} />}
 
     {showAddModal && <IBCAddModal onClose={()=>setShowAddModal(false)} onAdd={addPolicy} />}
     {showLocModal && <IBCLocModal onClose={()=>setShowLocModal(false)} onAdd={addLoc} />}
@@ -1725,12 +1730,22 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editMonth, setEditMonth] = useState('');
-  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false, isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'' });
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  const nextFlipSize = useMemo(() => {
+    if (!combinedRows || !combinedRows.length) return 0;
+    // Find the last forecast row's currentFlipAmount
+    for (let i = combinedRows.length - 1; i >= 0; i--) {
+      if (combinedRows[i].currentFlipAmount > 0) return combinedRows[i].currentFlipAmount;
+    }
+    return 0;
+  }, [combinedRows]);
+  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:'', startDate:'', isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'', splits:[{ id: uid(), name:'Main', amount:'', yield:12, durationYears:5, indexFund:false }] });
   const [editingFlipId, setEditingFlipId] = useState(null);
   const [exportData, setExportData] = useState(null);
   const [importData, setImportData] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [detailRange, setDetailRange] = useState('default');
+  const [showGapDealModal, setShowGapDealModal] = useState(false);
 
   // Load from storage
   useEffect(() => {
@@ -1921,14 +1936,21 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const updateSplit = (flipId, splitId, field, value) => { const next = trackedFlips.map(f => { if(f.id!==flipId)return f; const splits=(f.splits||flipSplits(f)).map(s=>{if(s.id!==splitId)return s;const u={...s,[field]:value};if(['amount','yield','durationYears'].includes(field))u.monthlyPmt=monthlyPmt(u.amount,(u.yield||8)/100,u.durationYears);return u;}); return{...f,splits,amount:splits.reduce((sum,s)=>sum+s.amount,0)}; }); persistFlips(next); };
 
   const addFlip = () => {
-    if (!newFlipForm.name || !newFlipForm.startDate) return;
+    if (!newFlipForm.name) return;
+    const flipStartDate = newFlipForm.startDate || todayStr;
+    const formSplits = newFlipForm.splits.map(s => ({
+      ...s, id: uid(), amount: Number(s.amount)||0, yield: Number(s.yield)||12, durationYears: Number(s.durationYears)||5,
+      monthlyPmt: monthlyPmt(Number(s.amount)||0, (Number(s.yield)||12)/100, Number(s.durationYears)||5),
+      actualCF: {},
+    }));
+    const totalAmt = formSplits.reduce((s, sp) => s + sp.amount, 0);
     const f = {
-      id: uid(), name: newFlipForm.name, amount: newFlipForm.amount, startDate: newFlipForm.startDate,
+      id: uid(), name: newFlipForm.name, amount: totalAmt, startDate: flipStartDate,
       dibs: newFlipForm.isDibs ? { sourceType: newFlipForm.dibsSourceType, sourceId: newFlipForm.dibsSourceId, destPolicyId: newFlipForm.dibsDestPolicyId } : null,
-      splits: [{ id: uid(), name: 'Main', amount: newFlipForm.amount, yield: newFlipForm.yield, durationYears: newFlipForm.durationYears, monthlyPmt: monthlyPmt(newFlipForm.amount, newFlipForm.yield/100, newFlipForm.durationYears), indexFund: newFlipForm.indexFund || false, actualCF: {} }],
+      splits: formSplits,
     };
     persistFlips([...trackedFlips, f]);
-    setNewFlipForm({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false, isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'' });
+    setNewFlipForm({ name:'', amount:'', startDate:'', isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'', splits:[{ id: uid(), name:'Main', amount:'', yield:12, durationYears:5, indexFund:false }] });
   };
   const removeFlip = (id) => persistFlips(trackedFlips.filter(f=>f.id!==id));
   const updateFlip = (id, field, value) => { const next = trackedFlips.map(f => { if(f.id!==id)return f; const u={...f,[field]:value}; if(['amount','yield','durationYears'].includes(field))u.monthlyPmt=monthlyPmt(u.amount,(u.yield||8)/100,u.durationYears); return u; }); persistFlips(next); };
@@ -1941,6 +1963,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     ['flips','🔄 Flips'],
     ['detail','▤ Detail'],
     ['ibc','🛡️ IBC'],
+    ['gap','📐 Gap Analysis'],
     ['settings','⚙ Settings'],
   ];
 
@@ -1996,9 +2019,9 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       {/* TABS */}
       <div style={{padding:'8px 20px',borderBottom:'1px solid #0f172a',display:'flex',gap:4,overflowX:'auto'}}>
         {tabs.map(([id,l])=>(<button key={id} onClick={()=>setTab(id)} style={{
-          padding:'7px 14px',borderRadius:6,border:tab===id?'1px solid '+(id==='ibc'?'#166534':'#164e63'):'1px solid transparent',
-          background:tab===id?(id==='ibc'?'#052e16':'#0c1929'):'transparent',
-          color:tab===id?(id==='ibc'?'#22c55e':'#06b6d4'):'#64748b',
+          padding:'7px 14px',borderRadius:6,border:tab===id?'1px solid '+(id==='ibc'?'#166534':id==='gap'?'#164e63':'#164e63'):'1px solid transparent',
+          background:tab===id?(id==='ibc'?'#052e16':id==='gap'?'#0c1929':'#0c1929'):'transparent',
+          color:tab===id?(id==='ibc'?'#22c55e':id==='gap'?'#f59e0b':'#06b6d4'):'#64748b',
           fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'var(--m)',transition:'all .15s',whiteSpace:'nowrap',
         }}>{l}</button>))}
       </div>
@@ -2075,32 +2098,32 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
         {/* ═══ FLIPS (with DIBS toggle) ═══ */}
         {tab==="flips"&&(<div className="fi">
           <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:18}}>
-            <h3 style={{fontSize:13,fontWeight:700,marginBottom:14,fontFamily:'var(--m)',color:'#f59e0b'}}>🔄 Add New Flip</h3>
-            <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
-              <Inp label="Name" value={newFlipForm.name} onChange={v=>setNewFlipForm({...newFlipForm,name:v})} type="text" small note="e.g. Flip #1" style={{flex:'1 1 140px'}}/>
-              <Inp label="Amount" value={newFlipForm.amount} onChange={v=>setNewFlipForm({...newFlipForm,amount:v})} pre="$" step={500} small style={{flex:'1 1 100px'}}/>
-              <Inp label="Yield" value={newFlipForm.yield} onChange={v=>setNewFlipForm({...newFlipForm,yield:v})} suf="%" step={0.5} small style={{flex:'0 0 80px'}}/>
-              <Inp label="Start Date" value={newFlipForm.startDate} onChange={v=>setNewFlipForm({...newFlipForm,startDate:v})} type="text" note="YYYY-MM-DD" small style={{flex:'1 1 130px'}}/>
-              <Inp label="Duration" value={newFlipForm.durationYears} onChange={v=>setNewFlipForm({...newFlipForm,durationYears:v})} suf="yrs" step={0.5} small style={{flex:'0 0 90px'}}/>
-              <div style={{flex:'0 0 auto',marginBottom:8,display:'flex',alignItems:'flex-end',gap:8,paddingBottom:2}}>
-                <div style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',padding:'6px 0'}} onClick={()=>setNewFlipForm({...newFlipForm,indexFund:!newFlipForm.indexFund})}>
-                  <div style={{width:15,height:15,borderRadius:3,border:'1px solid '+(newFlipForm.indexFund?'#f97316':'#334155'),background:newFlipForm.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{newFlipForm.indexFund&&<span style={{color:'#fff',fontSize:9}}>✓</span>}</div>
-                  <span style={{fontSize:9,color:newFlipForm.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>IDX</span>
-                </div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+              <h3 style={{fontSize:13,fontWeight:700,fontFamily:'var(--m)',color:'#f59e0b'}}>🔄 Add New Flip</h3>
+              {nextFlipSize>0&&<div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)'}}>Next projected flip: <span style={{color:'var(--cyan)',fontWeight:600}}>{fmt(nextFlipSize)}</span></div>}
+            </div>
+            <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end',marginBottom:12}}>
+              <Inp label="Name" value={newFlipForm.name} onChange={v=>setNewFlipForm({...newFlipForm,name:v})} type="text" small note="e.g. Flip #5" style={{flex:'1 1 180px'}}/>
+              <div style={{flex:'1 1 130px',marginBottom:8}}>
+                <label style={{display:'block',fontSize:9,fontWeight:700,color:'#94a3b8',marginBottom:3,textTransform:'uppercase',letterSpacing:'.08em',fontFamily:'var(--m)'}}>Start Date</label>
+                <input type="date" value={newFlipForm.startDate||todayStr} onChange={e=>setNewFlipForm({...newFlipForm,startDate:e.target.value})}
+                  style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:6,padding:'7px 8px',color:'#e2e8f0',fontSize:13,fontFamily:'var(--m)',width:'100%',outline:'none'}} />
+              </div>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,paddingBottom:2}}>
                 <div style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',padding:'6px 0'}} onClick={()=>setNewFlipForm({...newFlipForm,isDibs:!newFlipForm.isDibs})}>
                   <div style={{width:15,height:15,borderRadius:3,border:'1px solid '+(newFlipForm.isDibs?'#60a5fa':'#334155'),background:newFlipForm.isDibs?'#60a5fa':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{newFlipForm.isDibs&&<span style={{color:'#fff',fontSize:9}}>✓</span>}</div>
                   <span style={{fontSize:9,color:newFlipForm.isDibs?'#60a5fa':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>DIBS</span>
                 </div>
               </div>
-              <div style={{marginBottom:8}}><Btn onClick={addFlip} color="#22c55e">+ Add Flip</Btn></div>
             </div>
-            {newFlipForm.isDibs&&<div style={{marginTop:10,padding:10,background:'rgba(96,165,250,.06)',border:'1px solid rgba(96,165,250,.12)',borderRadius:6}}>
+
+            {/* DIBS linking */}
+            {newFlipForm.isDibs&&<div style={{marginBottom:12,padding:10,background:'rgba(96,165,250,.06)',border:'1px solid rgba(96,165,250,.12)',borderRadius:6}}>
               <div style={{fontSize:10,fontWeight:600,color:'var(--blue)',fontFamily:'var(--m)',marginBottom:6}}>DIBS Linking</div>
               <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
                 <div style={{flex:'1 1 120px'}} className="ibc-field"><label>Source Type</label>
                   <select value={newFlipForm.dibsSourceType} onChange={e=>setNewFlipForm({...newFlipForm,dibsSourceType:e.target.value,dibsSourceId:''})}>
-                    <option value="loc">Credit Line (LOC)</option>
-                    <option value="policy">IBC Policy Loan</option>
+                    <option value="loc">Credit Line (LOC)</option><option value="policy">IBC Policy Loan</option>
                   </select>
                 </div>
                 <div style={{flex:'1 1 200px'}} className="ibc-field"><label>{newFlipForm.dibsSourceType==='policy'?'Source Policy':'Source LOC'}</label>
@@ -2108,8 +2131,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                     <option value="">Select...</option>
                     {newFlipForm.dibsSourceType==='policy'
                       ? ibcPolicies.map(p=><option key={p.id} value={p.id}>{p.name||'Unnamed'}{p.insured?' ('+p.insured+')':''}</option>)
-                      : ibcLocs.map(l=><option key={l.id} value={l.id}>{l.name||'Unnamed'}{l.lender?' — '+l.lender:''}</option>)
-                    }
+                      : ibcLocs.map(l=><option key={l.id} value={l.id}>{l.name||'Unnamed'}{l.lender?' — '+l.lender:''}</option>)}
                   </select>
                 </div>
                 <div style={{flex:'1 1 200px'}} className="ibc-field"><label>Destination IBC Policy</label>
@@ -2120,6 +2142,27 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                 </div>
               </div>
             </div>}
+
+            {/* Splits */}
+            <div style={{fontSize:10,fontWeight:700,color:'#64748b',fontFamily:'var(--m)',textTransform:'uppercase',marginBottom:6}}>Splits</div>
+            {newFlipForm.splits.map((sp, si) => (
+              <div key={sp.id} style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'flex-end',marginBottom:6,padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                <Inp label="Name" value={sp.name} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],name:v};setNewFlipForm({...newFlipForm,splits:ns});}} type="text" small style={{flex:'1 1 100px'}}/>
+                <Inp label="Amount" value={sp.amount} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],amount:v};setNewFlipForm({...newFlipForm,splits:ns});}} pre="$" step={500} small note={nextFlipSize>0?`next: ${fmtK(nextFlipSize)}`:''} style={{flex:'1 1 100px'}}/>
+                <Inp label="Yield" value={sp.yield} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],yield:v};setNewFlipForm({...newFlipForm,splits:ns});}} suf="%" step={0.5} small style={{flex:'0 0 70px'}}/>
+                <Inp label="Duration" value={sp.durationYears} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],durationYears:v};setNewFlipForm({...newFlipForm,splits:ns});}} suf="yrs" step={0.5} small style={{flex:'0 0 80px'}}/>
+                <div style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',marginBottom:8,paddingBottom:2}} onClick={()=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],indexFund:!ns[si].indexFund};setNewFlipForm({...newFlipForm,splits:ns});}}>
+                  <div style={{width:14,height:14,borderRadius:3,border:'1px solid '+(sp.indexFund?'#f97316':'#334155'),background:sp.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{sp.indexFund&&<span style={{color:'#fff',fontSize:9}}>✓</span>}</div>
+                  <span style={{fontSize:8,color:sp.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>IDX</span>
+                </div>
+                {newFlipForm.splits.length>1&&<Btn onClick={()=>{const ns=newFlipForm.splits.filter((_,i)=>i!==si);setNewFlipForm({...newFlipForm,splits:ns});}} color="#ef4444" small>×</Btn>}
+              </div>
+            ))}
+            <div style={{display:'flex',gap:8,marginTop:8}}>
+              <Btn onClick={()=>setNewFlipForm({...newFlipForm,splits:[...newFlipForm.splits,{id:uid(),name:`Split ${newFlipForm.splits.length+1}`,amount:'',yield:12,durationYears:5,indexFund:false}]})} color="#f59e0b" small>+ Add Split</Btn>
+              <Btn onClick={addFlip} color="#22c55e">+ Add Flip</Btn>
+              {newFlipForm.splits.length>0&&(()=>{const t=newFlipForm.splits.reduce((s,sp)=>s+(Number(sp.amount)||0),0);const pmt=newFlipForm.splits.reduce((s,sp)=>s+monthlyPmt(Number(sp.amount)||0,(Number(sp.yield)||12)/100,Number(sp.durationYears)||5),0);return t>0?<div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginLeft:8,paddingBottom:4,alignSelf:'center'}}>Total: {fmt(t)} · Pmt: {fmt(pmt)}/mo</div>:null;})()}
+            </div>
           </div>
 
           {trackedFlips.map(f=>{
@@ -2299,6 +2342,12 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
 
         {/* ═══ IBC SECTION ═══ */}
         {tab==="ibc"&&<IBCSection policies={ibcPolicies} setPolicies={setIbcPolicies} locs={ibcLocs} setLocs={setIbcLocs} deals={ibcDeals} setDeals={setIbcDeals} trackedFlips={trackedFlips} combinedRows={combinedRows} persistIBCPolicies={persistIBCPolicies} persistIBCLocs={persistIBCLocs} persistIBCDeals={persistIBCDeals} />}
+
+        {/* ═══ GAP ANALYSIS ═══ */}
+        {tab==="gap"&&<div className="fi">
+          <IBCGapAnalysis policies={ibcPolicies} deals={ibcDeals} locs={ibcLocs} trackedFlips={trackedFlips} combinedRows={combinedRows} addDeal={()=>setShowGapDealModal(true)} updateDeal={(id,u)=>persistIBCDeals(ibcDeals.map(d=>d.id===id?{...d,...u}:d))} deleteDeal={(id)=>persistIBCDeals(ibcDeals.filter(d=>d.id!==id))} />
+          {showGapDealModal && <IBCDealModal onClose={()=>setShowGapDealModal(false)} onAdd={(d)=>{persistIBCDeals([...ibcDeals,d]);setShowGapDealModal(false);}} policies={ibcPolicies} locs={ibcLocs} />}
+        </div>}
 
         {/* ═══ SETTINGS ═══ */}
         {tab==="settings"&&(<div className="fi" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:16}}>
