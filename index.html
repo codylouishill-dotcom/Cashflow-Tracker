@@ -884,6 +884,8 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
   const [showLocModal, setShowLocModal] = useState(false);
   const [showDealModal, setShowDealModal] = useState(false);
   const [editingPolicyId, setEditingPolicyId] = useState(null);
+  const [openYears, setOpenYears] = useState({}); // keyed by "policyId-year"
+  const toggleYr = (pid, yr) => { const k = pid+'-'+yr; setOpenYears(prev => ({...prev,[k]:!prev[k]})); };
 
   const toggleExpand = (id) => { const next = policies.map(p => p.id===id ? {...p, expanded:!p.expanded} : p); persistIBCPolicies(next); };
   const updatePolicyField = (pid, field, value) => { const next = policies.map(p => p.id===pid ? {...p, [field]: value} : p); persistIBCPolicies(next); };
@@ -1002,8 +1004,6 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
         const na = getNextAnniversary(p.startDate);
         const dtr = na ? daysBetween(new Date(), na) : null;
         const isEditing = editingPolicyId === p.id;
-        const [openYears, setOpenYears] = useState({});
-        const toggleYr = (yr) => setOpenYears(prev => ({...prev,[yr]:!prev[yr]}));
         const isForecast = (yr) => {
           if (p.actualYears && p.actualYears[yr]) return false;
           const sY = p.startDate ? ibcParseDate(p.startDate).getFullYear() : 2025;
@@ -1074,7 +1074,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
                 const dL = getYearEndLoan(yr);
                 const currentPY = p.startDate ? getCurrentPolicyYear(p.startDate) : 1;
                 const isCurrent = py === currentPY;
-                const showMonths = openYears[yr];
+                const showMonths = openYears[p.id+'-'+yr];
                 return (<React.Fragment key={yr}>
                   <tr style={isCurrent?{borderLeft:'3px solid var(--green)'}:forecast?{borderLeft:'3px solid var(--purple)'}:{}}>
                   <td>{yr}{isCurrent?' ←':''}</td><td style={{color:'#475569'}}>Yr {py}</td>
@@ -1083,7 +1083,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
                   <td style={{color:'var(--blue)'}}>{fmt(acv-dL)}</td>
                   <td><input className="ibc-inline" type="number" style={{color:forecast?'var(--purple)':'var(--green)'}} value={act.deathBenefit||''} onChange={e=>updateActual(p.id,yr,'deathBenefit',e.target.value)} placeholder="0" /></td>
                   <td>{forecast?<button className="loan-toggle" style={{color:'var(--purple)'}} onClick={()=>markActual(p.id,yr)}>Forecast ✓</button>:act.cashValue?<span style={{fontFamily:'var(--m)',fontSize:9,color:'var(--green)'}}>Actual</span>:''}</td>
-                  <td><button className="loan-toggle" onClick={()=>toggleYr(yr)}>{showMonths?'▴ Mo.':'▾ Mo.'}</button></td>
+                  <td><button className="loan-toggle" onClick={()=>toggleYr(p.id,yr)}>{showMonths?'▴ Mo.':'▾ Mo.'}</button></td>
                 </tr>
                 {showMonths && Array.from({length:12},(_,m) => {
                   const mk=`${yr}-${String(m+1).padStart(2,'0')}`;
