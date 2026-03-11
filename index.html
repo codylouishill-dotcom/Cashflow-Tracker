@@ -1477,8 +1477,6 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
 
 function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, addDeal, updateDeal, deleteDeal }) {
   const today = new Date();
-  const currentMonth = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}`;
-  const FORECAST_MONTHS = 240; // 20 years
 
   let totalCV = 0, totalLoans = 0;
   policies.forEach(p => { const cur = getCurrentActualsEnhanced(p); totalCV += cur.cashValue; totalLoans += getLatestLoan(p); });
@@ -1488,110 +1486,113 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
 
   const activeDeals = deals.filter(d => d.status !== 'completed');
   let totalCommitted = activeDeals.reduce((s,d) => s + Number(d.capitalNeeded||0), 0);
-
   const headroom = totalBorrowable - totalCommitted;
 
-  const mDiff = (mk1, mk2) => { const [y1,m1]=mk1.split('-').map(Number); const [y2,m2]=mk2.split('-').map(Number); return (y2-y1)*12+(m2-m1); };
+  // ── Build milestone events: renewals + flip deployments ──
+  const milestones = useMemo(() => {
+    const events = [];
+    const maxDate = new Date(today.getFullYear() + 20, today.getMonth(), 1);
 
-  // Compute largest flip amount per year from the simulation forecast
-  const largestFlipByYear = useMemo(() => {
-    const byYear = {};
-    if (!combinedRows || !combinedRows.length) return byYear;
-    combinedRows.forEach(row => {
-      if (!row.date) return;
-      const yr = row.date.getFullYear();
-      const flipAmt = row.currentFlipAmount || 0;
-      if (!byYear[yr] || flipAmt > byYear[yr]) byYear[yr] = flipAmt;
-    });
-    return byYear;
-  }, [combinedRows]);
+    // 1. Policy renewal milestones — each anniversary where CV steps up
+    policies.forEach(p => {
+      if (!p.startDate || !p.illustration.length) return;
+      const start = ibcParseDate(p.startDate);
+      const sYr = start.getFullYear();
 
-  const timeline = useMemo(() => {
-    const months = [];
-    for (let i = 0; i < FORECAST_MONTHS; i++) {
-      const d = new Date(today.getFullYear(), today.getMonth()+i, 1);
-      months.push({ key:`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, label:`${MO[d.getMonth()]} ${d.getFullYear()}`, date:d });
-    }
-    return months.map(m => {
-      // Project policy CVs forward using illustration data
-      // Illustration Year 1 = start values, Year 2 = first renewal, Year N = (N-1)th renewal
-      // CV updates immediately; DB updates at renewals only
-      let totalProjBorrowable = 0;
-
-      // Compute DIBS impact for this month
-      const dibsImpact = calcDibsImpact(trackedFlips, m.date);
-
-      policies.forEach(p => {
-        let cv = getCurrentActualsEnhanced(p).cashValue;
-        if (p.startDate && p.illustration.length) {
-          const start = ibcParseDate(p.startDate);
-          const annivMonth = start.getMonth();
-          const annivDay = start.getDate();
-          let renewalsPassed;
-          if (m.date.getMonth() > annivMonth || (m.date.getMonth() === annivMonth && m.date.getDate() >= annivDay)) {
-            renewalsPassed = m.date.getFullYear() - start.getFullYear();
-          } else {
-            renewalsPassed = m.date.getFullYear() - start.getFullYear() - 1;
-          }
-          renewalsPassed = Math.max(0, renewalsPassed);
-          const illusYear = renewalsPassed + 1;
-          const row = p.illustration.find(r => r.year === illusYear);
-          if (row) cv = row.ngCV;
-          else {
-            const earlier = p.illustration.filter(r => r.year <= illusYear).sort((a,b) => b.year - a.year);
-            if (earlier.length) cv = earlier[0].ngCV;
-          }
+      p.illustration.forEach(row => {
+        // Illustration Year 1 = start, Year N = (N-1)th renewal
+        let eventDate;
+        if (row.year === 1) {
+          eventDate = start; // policy start
+        } else {
+          // Renewal N-1 happens at the anniversary in year startYear + row.year - 1
+          eventDate = new Date(sYr + row.year - 1, start.getMonth(), start.getDate());
         }
+        if (eventDate > maxDate) return;
+
+        events.push({
+          date: eventDate,
+          type: 'renewal',
+          label: row.year === 1 ? `${p.name||'Policy'} — Start` : `${p.name||'Policy'} — Renewal ${row.year - 1}`,
+          policyId: p.id,
+          policyName: p.name || 'Policy',
+          illusYear: row.year,
+          cv: row.ngCV,
+        });
+      });
+    });
+
+    // 2. Flip deployment events from simulation
+    if (combinedRows && combinedRows.length > 1) {
+      let prevFlipNum = combinedRows[0]?.flipNumber || 0;
+      for (let i = 1; i < combinedRows.length; i++) {
+        const row = combinedRows[i];
+        if (!row.date || row.date > maxDate) continue;
+        if (row.flipNumber > prevFlipNum) {
+          events.push({
+            date: row.date,
+            type: 'flip',
+            label: `Flip #${row.flipNumber} deploys`,
+            flipAmount: row.currentFlipAmount || 0,
+            flipNumber: row.flipNumber,
+            source: row.source || 'forecast',
+          });
+        }
+        prevFlipNum = row.flipNumber;
+      }
+    }
+
+    // Sort by date
+    events.sort((a, b) => a.date - b.date);
+
+    // 3. Compute running borrowable at each event
+    // Track per-policy CV based on which renewals have occurred
+    const policyCV = {};
+    policies.forEach(p => {
+      // Start with illustration Year 1 CV if available, else current
+      const yr1 = p.illustration.find(r => r.year === 1);
+      policyCV[p.id] = yr1 ? yr1.ngCV : getCurrentActualsEnhanced(p).cashValue;
+    });
+
+    const enriched = events.map(evt => {
+      // If this is a renewal event, update that policy's CV
+      if (evt.type === 'renewal') {
+        policyCV[evt.policyId] = evt.cv;
+      }
+
+      // Compute total borrowable at this point in time
+      const dibsImpact = calcDibsImpact(trackedFlips, evt.date);
+      let totalBorrowableAtDate = 0;
+      policies.forEach(p => {
+        const cv = policyCV[p.id] || 0;
         const baseLoan = getLatestLoan(p);
         const dibsLoan = dibsImpact[p.id] || 0;
-        totalProjBorrowable += Math.max(0, cv - baseLoan - dibsLoan);
+        totalBorrowableAtDate += Math.max(0, cv - baseLoan - dibsLoan);
       });
-      totalProjBorrowable += locAvailable;
+      totalBorrowableAtDate += locAvailable;
 
-      // Largest flip for this year (from simulation)
-      const largestFlip = largestFlipByYear[m.date.getFullYear()] || 0;
+      // For flip events, compute gap
+      const gap = evt.type === 'flip' ? totalBorrowableAtDate - evt.flipAmount : null;
 
-      // Deal commitments
-      let standardCommitted = 0, dibsSourceRemaining = 0;
-      deals.forEach(d => {
-        if (d.status === 'completed') return;
-        if (d.type === 'standard') {
-          if (d.startMonth && m.key >= d.startMonth && (!d.endMonth || m.key <= d.endMonth)) standardCommitted += Number(d.capitalNeeded||0);
-        } else if (d.type === 'dibs' && d.startMonth && m.key >= d.startMonth) {
-          const loanAmt = Number(d.dibsAmount||d.capitalNeeded||0);
-          const pmt = Number(d.dibsMonthlyPayment||0);
-          const term = Number(d.dibsTerm||9999);
-          const elapsed = Math.min(mDiff(d.startMonth, m.key), term);
-          dibsSourceRemaining += Math.max(0, loanAmt - (pmt * elapsed));
-        }
-      });
-
-      const gap = totalProjBorrowable - largestFlip - standardCommitted;
-
-      return { ...m, projBorrowable: totalProjBorrowable, largestFlip, standardCommitted, dibsSourceRemaining, gap, isGap: gap < 0 };
+      return {
+        ...evt,
+        borrowableAtDate: totalBorrowableAtDate,
+        gap,
+        isGap: gap !== null && gap < 0,
+      };
     });
-  }, [policies, deals, locs, trackedFlips, largestFlipByYear]);
 
-  const firstGap = timeline.find(m => m.isGap);
+    return enriched;
+  }, [policies, locs, trackedFlips, combinedRows]);
 
-  // Build yearly summary for the overview
-  const yearlySummary = useMemo(() => {
-    const years = {};
-    timeline.forEach(m => {
-      const yr = m.date.getFullYear();
-      if (!years[yr]) years[yr] = { year: yr, largestFlip: 0, projBorrowable: 0, worstGap: Infinity };
-      if (m.largestFlip > years[yr].largestFlip) years[yr].largestFlip = m.largestFlip;
-      if (m.projBorrowable > years[yr].projBorrowable) years[yr].projBorrowable = m.projBorrowable;
-      if (m.gap < years[yr].worstGap) years[yr].worstGap = m.gap;
-    });
-    return Object.values(years).sort((a,b) => a.year - b.year);
-  }, [timeline]);
+  const firstGap = milestones.find(m => m.isGap);
+  const isPast = (d) => d < today;
 
   return (<div>
     {firstGap && <div style={{padding:12,background:'rgba(239,68,68,.06)',border:'1px solid rgba(239,68,68,.15)',borderRadius:8,marginBottom:16,display:'flex',gap:10}}>
       <div style={{fontSize:18}}>⚠️</div>
       <div><div style={{fontWeight:700,color:'var(--red)',fontSize:13}}>LOC Gap Detected</div>
-      <div style={{fontFamily:'var(--m)',fontSize:11,color:'var(--t2)'}}>In <strong>{firstGap.label}</strong>, largest flip of <strong style={{color:'var(--cyan)'}}>{fmt(firstGap.largestFlip)}</strong> + deal commitments exceed borrowable <strong style={{color:'var(--green)'}}>{fmt(firstGap.projBorrowable)}</strong> — shortfall of <strong style={{color:'var(--red)'}}>{fmt(Math.abs(firstGap.gap))}</strong></div></div>
+      <div style={{fontFamily:'var(--m)',fontSize:11,color:'var(--t2)'}}>At <strong>{ibcFormatDate(firstGap.date)}</strong>, flip #{firstGap.flipNumber} of <strong style={{color:'var(--cyan)'}}>{fmt(firstGap.flipAmount)}</strong> exceeds available <strong style={{color:'var(--green)'}}>{fmt(firstGap.borrowableAtDate)}</strong> — shortfall of <strong style={{color:'var(--red)'}}>{fmt(Math.abs(firstGap.gap))}</strong></div></div>
     </div>}
 
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12,marginBottom:18}}>
@@ -1602,25 +1603,47 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
       <SummaryCard label="Headroom" value={fmt(headroom)} color={headroom>=0?'var(--green)':'var(--red)'} />
     </div>
 
-    {/* Yearly LOC Needs — 20 year view */}
+    {/* Milestone Timeline */}
     <div style={{marginBottom:20}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
         <div>
-          <div style={{fontSize:13,fontWeight:700}}>Largest Flip LOC Need by Year</div>
-          <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)'}}>Projected from cashflow simulation — shows the biggest single flip you'll deploy each year</div>
+          <div style={{fontSize:13,fontWeight:700}}>Renewal & Flip Timeline</div>
+          <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)'}}>Policy renewals (CV step-ups) interleaved with projected flip deployments — shows available capital at each decision point</div>
         </div>
         <Btn onClick={addDeal} color="#f59e0b" small>+ Deal</Btn>
       </div>
       <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr>
-        <th>Year</th><th>Largest Flip</th><th>Proj. Borrowable</th><th>Headroom</th><th></th>
+        <th>Date</th><th>Event</th><th>Available After</th><th>Flip Size</th><th>Headroom</th><th></th>
       </tr></thead><tbody>
-        {yearlySummary.slice(0, 20).map(yr => (<tr key={yr.year} style={yr.worstGap<0?{background:'rgba(239,68,68,.04)'}:yr.year===today.getFullYear()?{background:'rgba(34,197,94,.04)'}:{}}>
-          <td style={{fontWeight:yr.year===today.getFullYear()?600:400}}>{yr.year}{yr.year===today.getFullYear()?' ←':''}</td>
-          <td style={{color:'var(--cyan)',fontWeight:600}}>{fmt(yr.largestFlip)}</td>
-          <td style={{color:'var(--green)'}}>{fmt(yr.projBorrowable)}</td>
-          <td style={{color:yr.worstGap>=0?'var(--green)':'var(--red)',fontWeight:yr.worstGap<0?600:400}}>{fmt(yr.worstGap)}</td>
-          <td>{yr.worstGap<0?<span className="badge badge-r">GAP</span>:yr.worstGap<yr.largestFlip*0.3&&yr.largestFlip>0?<span className="badge badge-w">Tight</span>:''}</td>
-        </tr>))}
+        {milestones.filter(m => !isPast(m.date) || m.date.getFullYear() === today.getFullYear()).map((m, i) => {
+          const isRenewal = m.type === 'renewal';
+          const isFlip = m.type === 'flip';
+          const isActual = isFlip && m.source === 'actual';
+          return (<tr key={i} style={m.isGap?{background:'rgba(239,68,68,.04)'}:isRenewal?{background:'rgba(34,197,94,.02)'}:{}}>
+            <td style={{color:isRenewal?'var(--green)':isActual?'var(--cyan)':'var(--t2)',fontWeight:isPast(m.date)?400:500}}>
+              {ibcFormatDate(m.date)}
+            </td>
+            <td>
+              {isRenewal && <span style={{display:'flex',alignItems:'center',gap:6}}>
+                <span style={{color:'var(--green)',fontSize:10}}>▲</span>
+                <span style={{color:'var(--green)',fontSize:11}}>{m.label}</span>
+                <span style={{color:'var(--t4)',fontSize:10,fontFamily:'var(--m)'}}>CV → {fmt(m.cv)}</span>
+              </span>}
+              {isFlip && <span style={{display:'flex',alignItems:'center',gap:6}}>
+                <span style={{color:'var(--cyan)',fontSize:10}}>●</span>
+                <span style={{color:isActual?'var(--cyan)':'var(--t2)',fontSize:11}}>{m.label}</span>
+                {isActual&&<span className="badge badge-g" style={{fontSize:8}}>actual</span>}
+                {!isActual&&<span className="badge badge-b" style={{fontSize:8}}>forecast</span>}
+              </span>}
+            </td>
+            <td style={{color:'var(--green)',fontWeight:isRenewal?600:400}}>{fmt(m.borrowableAtDate)}</td>
+            <td style={{color:isFlip?'var(--cyan)':'#334155',fontWeight:isFlip?600:400}}>{isFlip?fmt(m.flipAmount):'—'}</td>
+            <td style={{color:m.gap==null?'#334155':m.gap>=0?'var(--green)':'var(--red)',fontWeight:m.isGap?600:400}}>
+              {m.gap!=null?fmt(m.gap):'—'}
+            </td>
+            <td>{m.isGap?<span className="badge badge-r">GAP</span>:isFlip&&m.gap!=null&&m.gap<m.flipAmount*0.3?<span className="badge badge-w">Tight</span>:isFlip&&m.gap!=null?<span className="badge badge-g">OK</span>:''}</td>
+          </tr>);
+        })}
       </tbody></table></div>
     </div>
 
@@ -1647,14 +1670,14 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
       {(()=>{
         const [amount, setAmount] = useState('');
         const needed = Number(amount||0);
-        const canNow = needed > 0 && needed <= headroom;
-        const firstViable = needed > 0 && !canNow ? timeline.find(m => m.gap >= needed) : null;
+        const canNow = needed > 0 && needed <= totalBorrowable;
+        const firstViableRenewal = needed > 0 && !canNow ? milestones.find(m => m.type === 'renewal' && m.borrowableAtDate >= needed && m.date > today) : null;
         return (<div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
           <div className="ibc-field" style={{flex:1,minWidth:180}}><label>Capital needed for next deal?</label><input type="number" placeholder="e.g. 50000" value={amount} onChange={e=>setAmount(e.target.value)} /></div>
           <div style={{flex:1,minWidth:200,paddingBottom:4}}>
-            {needed>0&&canNow&&<div style={{fontFamily:'var(--m)',fontSize:12,color:'var(--green)',fontWeight:500}}>✓ You can fund this now — {fmt(headroom-needed)} remaining</div>}
-            {needed>0&&!canNow&&firstViable&&<div style={{fontFamily:'var(--m)',fontSize:12,color:'var(--amber)',fontWeight:500}}>⏳ Available in {firstViable.label}</div>}
-            {needed>0&&!canNow&&!firstViable&&<div style={{fontFamily:'var(--m)',fontSize:12,color:'var(--red)',fontWeight:500}}>✗ Not enough capacity in forecast window</div>}
+            {needed>0&&canNow&&<div style={{fontFamily:'var(--m)',fontSize:12,color:'var(--green)',fontWeight:500}}>✓ You can fund this now — {fmt(totalBorrowable-needed)} remaining</div>}
+            {needed>0&&!canNow&&firstViableRenewal&&<div style={{fontFamily:'var(--m)',fontSize:12,color:'var(--amber)',fontWeight:500}}>⏳ Available at {ibcFormatDate(firstViableRenewal.date)} ({firstViableRenewal.label})</div>}
+            {needed>0&&!canNow&&!firstViableRenewal&&<div style={{fontFamily:'var(--m)',fontSize:12,color:'var(--red)',fontWeight:500}}>✗ Not enough capacity in forecast window</div>}
           </div>
         </div>);
       })()}
