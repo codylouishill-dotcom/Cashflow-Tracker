@@ -1730,7 +1730,8 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editMonth, setEditMonth] = useState('');
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  const todayDate = new Date();
+  const todayStr = `${todayDate.getFullYear()}-${String(todayDate.getMonth()+1).padStart(2,'0')}-${String(todayDate.getDate()).padStart(2,'0')}`;
   const nextFlipSize = useMemo(() => {
     if (!combinedRows || !combinedRows.length) return 0;
     // Find the last forecast row's currentFlipAmount
