@@ -1310,10 +1310,24 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
             const pol = selected[0];
             const data = pol.illustration;
             const sYr = pol.startDate ? ibcParseDate(pol.startDate).getFullYear() : new Date().getFullYear();
-            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th><th>Age</th><th>Premium</th><th>Total Premiums</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
-              {data.map((r,i)=>{let tp=0;for(let j=0;j<=i;j++)tp+=data[j].premium;const rat=tp>0?((r.ngCV/tp)*100).toFixed(1):'0.0';
+            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th><th>Age</th><th>Premium</th><th>Total Paid</th><th>Cash Value</th><th>New CV</th><th>Death Benefit</th><th>Dividend</th><th>CV/Paid</th></tr></thead><tbody>
+              {data.map((r,i)=>{
+                let tp=0;for(let j=0;j<=i;j++)tp+=data[j].premium;
+                const rat=tp>0?((r.ngCV/tp)*100).toFixed(1):'0.0';
+                const prevCV = i > 0 ? data[i-1].ngCV : 0;
+                const newCV = r.ngCV - prevCV;
                 const calYr = sYr + r.year - 1;
-                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{calYr}</td><td style={{color:'#475569'}}>{r.age}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--amber)'}}>{fmt(tp)}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
+                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}>
+                  <td>{calYr}</td>
+                  <td style={{color:'#475569'}}>{r.age}</td>
+                  <td>{r.premium>0?fmt(r.premium):'—'}</td>
+                  <td style={{color:'var(--amber)'}}>{fmt(tp)}</td>
+                  <td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td>
+                  <td style={{color:newCV>=r.premium?'var(--green)':newCV>0?'var(--cyan)':'var(--red)'}}>{newCV>0?'+':''}{fmt(newCV)}</td>
+                  <td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td>
+                  <td style={{color:'#475569'}}>{fmt(r.div)}</td>
+                  <td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td>
+                </tr>);
               })}
             </tbody></table></div>;
           })()}
@@ -1322,17 +1336,15 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
           {!isSingle && (()=>{
             // Build calendar-year-based rows across all selected policies
             const calYearMap = {};
-            const cumPremMap = {}; // per-policy cumulative premiums
+            const yearPremMap = {}; // per-policy per-year premium (not cumulative)
             selected.forEach(p => {
               const sYr = p.startDate ? ibcParseDate(p.startDate).getFullYear() : new Date().getFullYear();
-              let cumPrem = 0;
               p.illustration.forEach(r => {
-                cumPrem += r.premium;
                 const calYr = sYr + r.year - 1;
                 if (!calYearMap[calYr]) calYearMap[calYr] = {};
                 calYearMap[calYr][p.id] = r;
-                if (!cumPremMap[calYr]) cumPremMap[calYr] = {};
-                cumPremMap[calYr][p.id] = cumPrem;
+                if (!yearPremMap[calYr]) yearPremMap[calYr] = {};
+                yearPremMap[calYr][p.id] = r.premium;
               });
             });
             const calYears = Object.keys(calYearMap).map(Number).sort((a,b) => a - b);
@@ -1353,12 +1365,12 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
                   tCV += r.ngCV; tDB += r.ngDB;
                   return <React.Fragment key={p.id}><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td></React.Fragment>;
                 });
-                selected.forEach(p => { tPrem += (cumPremMap[calYr]?.[p.id] || 0); });
+                selected.forEach(p => { tPrem += (yearPremMap[calYr]?.[p.id] || 0); });
                 const thisYear = new Date().getFullYear();
                 return <tr key={calYr} style={calYr===thisYear?{background:'rgba(34,197,94,.04)'}:{}}>
                   <td style={{fontWeight:calYr===thisYear?600:400}}>{calYr}{calYr===thisYear?' ←':''}</td>{cells}
                   {selected.length > 1 && <><td style={{color:'var(--green)',fontWeight:600}}>{fmt(tCV)}</td><td style={{color:'var(--purple)',fontWeight:600}}>{fmt(tDB)}</td></>}
-                  <td style={{color:'var(--amber)'}}>{fmt(tPrem)}</td>
+                  <td style={{color:'var(--amber)'}}>{tPrem>0?fmt(tPrem):'—'}</td>
                 </tr>;
               })}
             </tbody></table></div>;
