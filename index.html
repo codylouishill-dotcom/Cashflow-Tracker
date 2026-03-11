@@ -570,27 +570,46 @@ function prefillActuals(policy) {
   const actuals = { ...policy.actuals };
   const startYear = start.getFullYear();
 
-  // Illustration Year 1 = values at policy start (immediate CV, base DB)
-  // Illustration Year 2 = values at first renewal (startYear + 1)
-  // Illustration Year N = values at (N-1)th renewal (startYear + N - 1)
+  // CV and DB have different timing from the illustration:
+  // CV Year N → calendar year startYear + N - 1 (Year 1 CV = immediate at start)
+  // DB Year N → calendar year startYear + N (DB lags by one year; stays at base until first renewal)
+  //
+  // So for calendar year startYear + N - 1:
+  //   CV = illustration Year N
+  //   DB = illustration Year (N-1), or base if N=1
+  //
+  // Example (start Nov 2024):
+  //   2024: CV from Yr1 (15,484), DB = base (684,865)
+  //   2025: CV from Yr2 (38,922), DB from Yr1 (743,910)
+  //   2026: CV from Yr3 (63,466), DB from Yr2 (801,559)
+
   policy.illustration.forEach(row => {
-    const calendarYear = startYear + row.year - 1; // Year 1 → startYear, Year 2 → startYear+1, etc.
+    const calendarYear = startYear + row.year - 1; // CV year mapping
+    // Find the DB value: use previous illustration year's DB, or base for year 1
+    const prevIllusRow = policy.illustration.find(r => r.year === row.year - 1);
+    const dbValue = prevIllusRow ? String(prevIllusRow.ngDB) : String(policy.baseDeathBenefit || row.ngDB);
+
     if (!actuals[calendarYear]) {
-      if (row.year === 1) {
-        // Year 1 = policy start: CV is immediate, DB stays at base until first renewal
-        actuals[calendarYear] = {
-          cashValue: String(row.ngCV),
-          deathBenefit: String(policy.baseDeathBenefit || row.ngDB),
-        };
-      } else {
-        // Year 2+ = renewal values: both CV and DB update
-        actuals[calendarYear] = {
-          cashValue: String(row.ngCV),
-          deathBenefit: String(row.ngDB),
-        };
-      }
+      actuals[calendarYear] = {
+        cashValue: String(row.ngCV),
+        deathBenefit: dbValue,
+      };
     }
   });
+
+  // Also prefill one extra year at the end for the last DB value
+  // (the last illustration year's DB applies to startYear + lastYear)
+  const lastRow = policy.illustration[policy.illustration.length - 1];
+  if (lastRow) {
+    const lastDBYear = startYear + lastRow.year;
+    if (!actuals[lastDBYear]) {
+      actuals[lastDBYear] = {
+        cashValue: '', // no CV data for this year from illustration
+        deathBenefit: String(lastRow.ngDB),
+      };
+    }
+  }
+
   return { ...policy, actuals };
 }
 
@@ -935,6 +954,40 @@ function IBCDealModal({ onClose, onAdd, policies, locs }) {
 // IBC SECTION (integrated tab)
 // ═══════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════
+// DIBS IMPACT CALCULATOR
+// Computes cumulative policy loan increases on dest policies
+// and source paydowns for a given date, from DIBS-linked flips.
+// ═══════════════════════════════════════════════
+
+function calcDibsImpact(trackedFlips, targetDate) {
+  const policyLoans = {}; // destPolicyId → cumulative loans drawn from that policy
+
+  trackedFlips.forEach(f => {
+    if (!f.dibs || !f.dibs.destPolicyId) return;
+    const fStart = parseDate(f.startDate);
+    const fEnd = addMo(fStart, Math.round(flipMaxDuration(f) * 12));
+    const pmt = flipTotalPmt(f);
+
+    // Payments flow out of dest policy starting 1 month after flip start
+    const paymentStart = addMo(fStart, 1);
+    if (targetDate < paymentStart) return;
+
+    const endDate = targetDate < fEnd ? targetDate : fEnd;
+    const monthsElapsed = Math.max(0,
+      (endDate.getFullYear() - paymentStart.getFullYear()) * 12 +
+      (endDate.getMonth() - paymentStart.getMonth()) + 1
+    );
+    if (monthsElapsed <= 0) return;
+
+    const destId = f.dibs.destPolicyId;
+    policyLoans[destId] = (policyLoans[destId] || 0) + (pmt * monthsElapsed);
+  });
+
+  return policyLoans; // { policyId: cumulativeLoanAmount }
+}
+
+
 function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, trackedFlips, combinedRows, persistIBCPolicies, persistIBCLocs, persistIBCDeals }) {
   const [subTab, setSubTab] = useState('dashboard');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -1065,19 +1118,19 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
         const isForecast = (yr) => {
           if (p.actualYears && p.actualYears[yr]) return false;
           const sY = p.startDate ? ibcParseDate(p.startDate).getFullYear() : 2025;
-          // Illustration Year N → calendar year startYear + N - 1
-          // So calendar year yr → illustration year (yr - sY + 1)
-          const illusYear = yr - sY + 1;
-          if (illusYear < 1) return false;
-          const illusRow = p.illustration.find(r => r.year === illusYear);
-          if (!illusRow) return false;
+          // CV for calendar year yr comes from illustration Year (yr - sY + 1)
+          const cvIllusYear = yr - sY + 1;
+          if (cvIllusYear < 1) return false;
+          const cvRow = p.illustration.find(r => r.year === cvIllusYear);
+          if (!cvRow) return false;
           const act = p.actuals[yr];
           if (!act) return false;
-          // For year 1 (start year), DB was prefilled from baseDeathBenefit, not illustration
-          if (illusYear === 1) {
-            return String(act.cashValue) === String(illusRow.ngCV) && (String(act.deathBenefit) === String(p.baseDeathBenefit) || String(act.deathBenefit) === String(illusRow.ngDB));
-          }
-          return String(act.cashValue) === String(illusRow.ngCV) && String(act.deathBenefit) === String(illusRow.ngDB);
+          // DB for calendar year yr comes from illustration Year (yr - sY), or base if yr === sY
+          const dbIllusYear = yr - sY;
+          let expectedDB;
+          if (dbIllusYear <= 0) { expectedDB = String(p.baseDeathBenefit || cvRow.ngDB); }
+          else { const dbRow = p.illustration.find(r => r.year === dbIllusYear); expectedDB = dbRow ? String(dbRow.ngDB) : String(p.baseDeathBenefit); }
+          return String(act.cashValue) === String(cvRow.ngCV) && String(act.deathBenefit) === expectedDB;
         };
         const getYearEndLoan = (yr) => { const mks=[]; for(let m=1;m<=12;m++){const k=`${yr}-${String(m).padStart(2,'0')}`; if(p.monthlyLoans&&p.monthlyLoans[k]!==undefined)mks.push(k);} if(!mks.length)return 0; mks.sort(); return Number(p.monthlyLoans[mks[mks.length-1]]||0); };
         return (<div className="policy-card" key={p.id}>
@@ -1242,9 +1295,12 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
               let totalCV = 0, label = '';
               selected.forEach(p => { const r = p.illustration.find(d => d.year === yr); if (r) totalCV += r.ngCV; });
               if (totalCV === 0) return null;
+              // Show calendar year for the first selected policy
+              const refStart = selected[0].startDate ? ibcParseDate(selected[0].startDate).getFullYear() : new Date().getFullYear();
+              const calYr = refStart + yr - 1;
               if (isSingle) { const r = selected[0].illustration.find(d => d.year === yr); label = r ? `Age ${r.age}` : ''; }
               else { label = `${selected.length} policies`; }
-              return <SummaryCard key={yr} label={`Year ${yr}`} value={fmt(totalCV)} sub={label} color="var(--green)" />;
+              return <SummaryCard key={yr} label={String(calYr)} value={fmt(totalCV)} sub={label} color="var(--green)" />;
             })}
           </div>
 
@@ -1252,36 +1308,52 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
           {isSingle && (()=>{
             const pol = selected[0];
             const data = pol.illustration;
-            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Age</th><th>Yr</th><th>Premium</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
+            const sYr = pol.startDate ? ibcParseDate(pol.startDate).getFullYear() : new Date().getFullYear();
+            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th><th>Age</th><th>Premium</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
               {data.map((r,i)=>{let tp=0;for(let j=0;j<=i;j++)tp+=data[j].premium;const rat=tp>0?((r.ngCV/tp)*100).toFixed(1):'0.0';
-                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{r.age}</td><td>{r.year}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
+                const calYr = sYr + r.year - 1;
+                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{calYr}</td><td style={{color:'#475569'}}>{r.age}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
               })}
             </tbody></table></div>;
           })()}
 
           {/* Multiple policies: combined table with per-policy CV columns + totals */}
-          {!isSingle && <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr>
-            <th>Yr</th>
-            {selected.map(p => <React.Fragment key={p.id}>
-              <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} CV</th>
-              <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} DB</th>
-            </React.Fragment>)}
-            {selected.length > 1 && <><th>Total CV</th><th>Total DB</th></>}
-          </tr></thead><tbody>
-            {yearList.map(yr => {
-              let tCV = 0, tDB = 0;
-              const cells = selected.map(p => {
-                const r = p.illustration.find(x => x.year === yr);
-                if (!r) return <React.Fragment key={p.id}><td style={{color:'#475569'}}>—</td><td style={{color:'#475569'}}>—</td></React.Fragment>;
-                tCV += r.ngCV; tDB += r.ngDB;
-                return <React.Fragment key={p.id}><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td></React.Fragment>;
+          {!isSingle && (()=>{
+            // Build calendar-year-based rows across all selected policies
+            const calYearMap = {};
+            selected.forEach(p => {
+              const sYr = p.startDate ? ibcParseDate(p.startDate).getFullYear() : new Date().getFullYear();
+              p.illustration.forEach(r => {
+                const calYr = sYr + r.year - 1;
+                if (!calYearMap[calYr]) calYearMap[calYr] = {};
+                calYearMap[calYr][p.id] = r;
               });
-              return <tr key={yr} className={[5,10,20,30].includes(yr)?'hl':''}>
-                <td>{yr}</td>{cells}
-                {selected.length > 1 && <><td style={{color:'var(--green)',fontWeight:600}}>{fmt(tCV)}</td><td style={{color:'var(--purple)',fontWeight:600}}>{fmt(tDB)}</td></>}
-              </tr>;
-            })}
-          </tbody></table></div>}
+            });
+            const calYears = Object.keys(calYearMap).map(Number).sort((a,b) => a - b);
+            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr>
+              <th>Year</th>
+              {selected.map(p => <React.Fragment key={p.id}>
+                <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} CV</th>
+                <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} DB</th>
+              </React.Fragment>)}
+              {selected.length > 1 && <><th>Total CV</th><th>Total DB</th></>}
+            </tr></thead><tbody>
+              {calYears.map(calYr => {
+                let tCV = 0, tDB = 0;
+                const cells = selected.map(p => {
+                  const r = calYearMap[calYr]?.[p.id];
+                  if (!r) return <React.Fragment key={p.id}><td style={{color:'#475569'}}>—</td><td style={{color:'#475569'}}>—</td></React.Fragment>;
+                  tCV += r.ngCV; tDB += r.ngDB;
+                  return <React.Fragment key={p.id}><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td></React.Fragment>;
+                });
+                const thisYear = new Date().getFullYear();
+                return <tr key={calYr} style={calYr===thisYear?{background:'rgba(34,197,94,.04)'}:{}}>
+                  <td style={{fontWeight:calYr===thisYear?600:400}}>{calYr}{calYr===thisYear?' ←':''}</td>{cells}
+                  {selected.length > 1 && <><td style={{color:'var(--green)',fontWeight:600}}>{fmt(tCV)}</td><td style={{color:'var(--purple)',fontWeight:600}}>{fmt(tDB)}</td></>}
+                </tr>;
+              })}
+            </tbody></table></div>;
+          })()}
         </div>);
       })()}
     </div>}
@@ -1294,21 +1366,69 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
         {locs.length>0&&<SummaryCard label="LOC Available" value={fmt(locAvailable)} sub={`${locs.length} line${locs.length!==1?'s':''}`} color="var(--green)" />}
         <SummaryCard label="Total Available" value={fmt(totals.borrowable + locAvailable)} sub="For flips" color="var(--green)" />
       </div>
-      {policies.length>0&&policies[0].illustration.length>0&&<div>
-        <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Projected Borrowable by Year</div>
-        <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th><th>Cal Yr</th>
+      {(policies.length>0||locs.length>0)&&<div>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>Projected Borrowable by Year</div>
+        <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginBottom:10}}>Policy CV × 90% minus existing loans minus projected DIBS loan accumulation · Credit lines shown at current available</div>
+        <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th>
           {policies.map(p=><th key={p.id}>{p.name?p.name.split(' ').slice(0,2).join(' '):'Policy'}</th>)}
-          {policies.length>1&&<th>Total</th>}
+          {locs.length>0&&<th>Credit Lines</th>}
+          <th>Total</th>
         </tr></thead><tbody>
-          {[1,2,3,4,5,6,7,8,9,10,15,20,25,30,35,40].map(yr=>{
-            let tB=0;
-            const cells=policies.map(p=>{const r=p.illustration.find(x=>x.year===yr);if(!r)return<td key={p.id} style={{color:'#475569'}}>—</td>;const b=Math.round(r.ngCV*0.9);tB+=b;return<td key={p.id} style={{color:'var(--green)'}}>{fmt(b)}</td>;});
-            const sYr=policies[0]?.startDate?ibcParseDate(policies[0].startDate).getFullYear():currentYear;
-            const calYr = sYr + yr - 1; // Year 1 → startYear, Year 2 → startYear+1, etc.
-            const label = yr === 1 ? 'Start' : `Renewal ${yr-1}`;
-            return(<tr key={yr} className={[5,10,20,30].includes(yr)?'hl':''}><td>{label}</td><td style={{color:'#475569'}}>{calYr}</td>{cells}{policies.length>1&&<td style={{color:'var(--green)',fontWeight:600}}>{fmt(tB)}</td>}</tr>);
-          })}
+          {(()=>{
+            // Build calendar-year-based borrowable rows
+            const calYearMap = {};
+            policies.forEach(p => {
+              const sYr = p.startDate ? ibcParseDate(p.startDate).getFullYear() : currentYear;
+              p.illustration.forEach(r => {
+                const calYr = sYr + r.year - 1;
+                if (!calYearMap[calYr]) calYearMap[calYr] = {};
+                calYearMap[calYr][p.id] = r.ngCV;
+              });
+            });
+            // Ensure we have at least 20 years
+            for (let yr = currentYear; yr <= currentYear + 20; yr++) {
+              if (!calYearMap[yr]) calYearMap[yr] = {};
+            }
+            const calYears = Object.keys(calYearMap).map(Number).sort((a,b) => a - b);
+            const shown = calYears.filter(yr => {
+              const offset = yr - Math.min(...calYears);
+              return offset < 10 || offset % 5 === 0;
+            });
+            const locAvailStatic = locs.reduce((s, l) => s + Math.max(0, Number(l.creditLimit||0) - Number(l.currentBalance||0)), 0);
+
+            return shown.map(calYr => {
+              // Compute DIBS loan impact at end of this calendar year
+              const yearEnd = new Date(calYr, 11, 31);
+              const dibsImpact = calcDibsImpact(trackedFlips, yearEnd);
+
+              let tB = 0;
+              const cells = policies.map(p => {
+                const grossCV = calYearMap[calYr]?.[p.id];
+                if (grossCV == null) return <td key={p.id} style={{color:'#475569'}}>—</td>;
+                const baseLoan = getLatestLoan(p);
+                const dibsLoan = dibsImpact[p.id] || 0;
+                const netBorrowable = Math.max(0, grossCV * 0.9 - baseLoan - dibsLoan);
+                tB += netBorrowable;
+                const hasDibs = dibsLoan > 0;
+                return <td key={p.id} style={{color:hasDibs?'var(--cyan)':'var(--green)'}}>
+                  {fmt(netBorrowable)}{hasDibs&&<span style={{fontSize:8,color:'var(--amber)',marginLeft:3}}>−{fmtK(dibsLoan)}</span>}
+                </td>;
+              });
+
+              tB += locAvailStatic;
+
+              return <tr key={calYr} style={calYr===currentYear?{background:'rgba(34,197,94,.04)'}:{}}>
+                <td style={{fontWeight:calYr===currentYear?600:400}}>{calYr}{calYr===currentYear?' ←':''}</td>
+                {cells}
+                {locs.length>0&&<td style={{color:'var(--blue)'}}>{fmt(locAvailStatic)}</td>}
+                <td style={{color:'var(--green)',fontWeight:600}}>{fmt(tB)}</td>
+              </tr>;
+            });
+          })()}
         </tbody></table></div>
+        {trackedFlips.some(f=>f.dibs)&&<div style={{marginTop:8,fontSize:9,color:'#475569',fontFamily:'var(--m)'}}>
+          Cyan values indicate DIBS-adjusted borrowable (policy CV reduced by projected DIBS loan accumulation from linked flips)
+        </div>}
       </div>}
     </div>}
 
@@ -1368,13 +1488,16 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
       // Illustration Year 1 = start values, Year 2 = first renewal, Year N = (N-1)th renewal
       // CV updates immediately; DB updates at renewals only
       let totalProjBorrowable = 0;
+
+      // Compute DIBS impact for this month
+      const dibsImpact = calcDibsImpact(trackedFlips, m.date);
+
       policies.forEach(p => {
         let cv = getCurrentActualsEnhanced(p).cashValue;
         if (p.startDate && p.illustration.length) {
           const start = ibcParseDate(p.startDate);
           const annivMonth = start.getMonth();
           const annivDay = start.getDate();
-          // How many renewals have occurred by month m?
           let renewalsPassed;
           if (m.date.getMonth() > annivMonth || (m.date.getMonth() === annivMonth && m.date.getDate() >= annivDay)) {
             renewalsPassed = m.date.getFullYear() - start.getFullYear();
@@ -1382,20 +1505,17 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
             renewalsPassed = m.date.getFullYear() - start.getFullYear() - 1;
           }
           renewalsPassed = Math.max(0, renewalsPassed);
-          // renewalsPassed=0 → still in first year → illustration Year 1
-          // renewalsPassed=1 → first renewal passed → illustration Year 2
-          // renewalsPassed=N → illustration Year N+1
           const illusYear = renewalsPassed + 1;
           const row = p.illustration.find(r => r.year === illusYear);
           if (row) cv = row.ngCV;
           else {
-            // Find closest earlier illustration year
             const earlier = p.illustration.filter(r => r.year <= illusYear).sort((a,b) => b.year - a.year);
             if (earlier.length) cv = earlier[0].ngCV;
           }
         }
         const baseLoan = getLatestLoan(p);
-        totalProjBorrowable += Math.max(0, cv * 0.9 - baseLoan);
+        const dibsLoan = dibsImpact[p.id] || 0;
+        totalProjBorrowable += Math.max(0, cv * 0.9 - baseLoan - dibsLoan);
       });
       totalProjBorrowable += locAvailable;
 
@@ -1804,6 +1924,20 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <div style={{fontSize:8,color:'#64748b',fontFamily:'var(--m)',letterSpacing:'.06em',fontWeight:500}}>INDEX FUND</div>
             <div style={{fontSize:14,fontWeight:800,color:'#f97316'}}>{idxSim.freedomDate?fmtDate(idxSim.freedomDate):">50yr"}</div>
           </div>
+          {signedIn
+            ? <div onClick={onSignOut} style={{padding:'8px 12px',borderRadius:8,background:'rgba(34,197,94,.06)',border:'1px solid rgba(34,197,94,.12)',cursor:'pointer',transition:'all .15s'}}>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <div style={{width:7,height:7,borderRadius:'50%',background:'#22c55e'}}/>
+                  <span style={{fontSize:9,fontWeight:600,color:'#22c55e',fontFamily:'var(--m)'}}>Synced</span>
+                </div>
+              </div>
+            : <button onClick={onSignIn} style={{padding:'8px 12px',borderRadius:8,background:'rgba(96,165,250,.06)',border:'1px solid rgba(96,165,250,.15)',cursor:'pointer',transition:'all .15s'}}>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <div style={{width:7,height:7,borderRadius:'50%',background:'#ef4444'}}/>
+                  <span style={{fontSize:9,fontWeight:600,color:'#60a5fa',fontFamily:'var(--m)'}}>Sign In</span>
+                </div>
+              </button>
+          }
         </div>
       </header>
 
