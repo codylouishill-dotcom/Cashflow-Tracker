@@ -997,6 +997,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
   const [openYears, setOpenYears] = useState({}); // keyed by "policyId-year"
   const toggleYr = (pid, yr) => { const k = pid+'-'+yr; setOpenYears(prev => ({...prev,[k]:!prev[k]})); };
   const [projSelectedIds, setProjSelectedIds] = useState(null); // null = all
+  const [borrowableDetailYear, setBorrowableDetailYear] = useState(null); // click to expand year
 
   const toggleExpand = (id) => { const next = policies.map(p => p.id===id ? {...p, expanded:!p.expanded} : p); persistIBCPolicies(next); };
   const updatePolicyField = (pid, field, value) => { const next = policies.map(p => p.id===pid ? {...p, [field]: value} : p); persistIBCPolicies(next); };
@@ -1020,7 +1021,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
   const totals = useMemo(() => {
     let cv=0, loans=0, db=0;
     policies.forEach(p => { const cur = getCurrentActualsEnhanced(p); cv += cur.cashValue; db += cur.deathBenefit; loans += getLatestLoan(p); });
-    return { cashValue:cv, loans, netCashValue:cv-loans, deathBenefit:db, borrowable:Math.max(0,cv*0.9-loans) };
+    return { cashValue:cv, loans, netCashValue:cv-loans, deathBenefit:db, borrowable:Math.max(0,cv-loans) };
   }, [policies]);
 
   const upcomingPremiums = useMemo(() => {
@@ -1081,7 +1082,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
         <SummaryCard label="Policy Loans" value={fmt(totals.loans)} sub="Latest month" color="var(--amber)" />
         <SummaryCard label="Net Cash Value" value={fmt(totals.netCashValue)} sub="CV − loans" color="var(--blue)" />
         <SummaryCard label="Death Benefit" value={fmt(totals.deathBenefit)} sub="Current" color="var(--purple)" />
-        <SummaryCard label="IBC Borrowable" value={fmt(totals.borrowable)} sub="~90% CV − loans" color="var(--green)" />
+        <SummaryCard label="IBC Borrowable" value={fmt(totals.borrowable)} sub="CV − loans" color="var(--green)" />
         {locs.length>0&&<SummaryCard label="LOC Available" value={fmt(locAvailable)} sub={`${locs.length} line${locs.length!==1?'s':''} · ${fmt(locBalance)} drawn`} color="var(--green)" />}
         {locs.length>0&&<SummaryCard label="Total Capital Available" value={fmt(totals.borrowable + locAvailable)} sub="IBC + LOCs" color="var(--green)" />}
       </div>
@@ -1362,13 +1363,13 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
     {subTab==='borrowable'&&<div>
       <div style={{fontSize:15,fontWeight:700,marginBottom:12}}>Borrowable Equity for Flips</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:18}}>
-        <SummaryCard label="IBC Available" value={fmt(totals.borrowable)} sub="90% CV − policy loans" color="var(--green)" />
+        <SummaryCard label="IBC Available" value={fmt(totals.borrowable)} sub="CV − policy loans" color="var(--green)" />
         {locs.length>0&&<SummaryCard label="LOC Available" value={fmt(locAvailable)} sub={`${locs.length} line${locs.length!==1?'s':''}`} color="var(--green)" />}
         <SummaryCard label="Total Available" value={fmt(totals.borrowable + locAvailable)} sub="For flips" color="var(--green)" />
       </div>
       {(policies.length>0||locs.length>0)&&<div>
         <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>Projected Borrowable by Year</div>
-        <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginBottom:10}}>Policy CV × 90% minus existing loans minus projected DIBS loan accumulation · Credit lines shown at current available</div>
+        <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginBottom:10}}>Policy CV minus existing loans minus projected DIBS loan accumulation · Credit lines shown at current available</div>
         <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Year</th>
           {policies.map(p=><th key={p.id}>{p.name?p.name.split(' ').slice(0,2).join(' '):'Policy'}</th>)}
           {locs.length>0&&<th>Credit Lines</th>}
@@ -1400,29 +1401,57 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
               // Compute DIBS loan impact at end of this calendar year
               const yearEnd = new Date(calYr, 11, 31);
               const dibsImpact = calcDibsImpact(trackedFlips, yearEnd);
+              const isExpanded = borrowableDetailYear === calYr;
 
               let tB = 0;
-              const cells = policies.map(p => {
+              const cellData = policies.map(p => {
                 const grossCV = calYearMap[calYr]?.[p.id];
-                if (grossCV == null) return <td key={p.id} style={{color:'#475569'}}>—</td>;
+                if (grossCV == null) return { pid: p.id, empty: true };
                 const baseLoan = getLatestLoan(p);
                 const dibsLoan = dibsImpact[p.id] || 0;
-                const netBorrowable = Math.max(0, grossCV * 0.9 - baseLoan - dibsLoan);
+                const netBorrowable = Math.max(0, grossCV - baseLoan - dibsLoan);
                 tB += netBorrowable;
-                const hasDibs = dibsLoan > 0;
-                return <td key={p.id} style={{color:hasDibs?'var(--cyan)':'var(--green)'}}>
-                  {fmt(netBorrowable)}{hasDibs&&<span style={{fontSize:8,color:'var(--amber)',marginLeft:3}}>−{fmtK(dibsLoan)}</span>}
-                </td>;
+                return { pid: p.id, grossCV, baseLoan, dibsLoan, netBorrowable, name: p.name || 'Policy' };
               });
 
               tB += locAvailStatic;
 
-              return <tr key={calYr} style={calYr===currentYear?{background:'rgba(34,197,94,.04)'}:{}}>
-                <td style={{fontWeight:calYr===currentYear?600:400}}>{calYr}{calYr===currentYear?' ←':''}</td>
-                {cells}
-                {locs.length>0&&<td style={{color:'var(--blue)'}}>{fmt(locAvailStatic)}</td>}
-                <td style={{color:'var(--green)',fontWeight:600}}>{fmt(tB)}</td>
-              </tr>;
+              return (<React.Fragment key={calYr}>
+                <tr style={calYr===currentYear?{background:'rgba(34,197,94,.04)'}:{}} onClick={()=>setBorrowableDetailYear(isExpanded?null:calYr)}>
+                  <td style={{fontWeight:calYr===currentYear?600:400,cursor:'pointer'}}>{calYr}{calYr===currentYear?' ←':''} <span style={{fontSize:8,color:'var(--blue)'}}>{isExpanded?'▴':'▾'}</span></td>
+                  {cellData.map(d => d.empty
+                    ? <td key={d.pid} style={{color:'#475569'}}>—</td>
+                    : <td key={d.pid} style={{color:d.dibsLoan>0?'var(--cyan)':'var(--green)'}}>
+                        {fmt(d.netBorrowable)}{d.dibsLoan>0&&<span style={{fontSize:8,color:'var(--amber)',marginLeft:3}}>−{fmtK(d.dibsLoan)}</span>}
+                      </td>
+                  )}
+                  {locs.length>0&&<td style={{color:'var(--blue)'}}>{fmt(locAvailStatic)}</td>}
+                  <td style={{color:'var(--green)',fontWeight:600}}>{fmt(tB)}</td>
+                </tr>
+                {isExpanded && cellData.filter(d=>!d.empty).map(d => (
+                  <tr key={d.pid+'-detail'} style={{background:'rgba(15,23,42,.6)'}}>
+                    <td style={{paddingLeft:20,color:'#475569',fontSize:10,fontWeight:400}}>{d.name}</td>
+                    <td colSpan={policies.length + (locs.length>0?1:0) + 1} style={{fontSize:10,color:'#94a3b8',fontFamily:'var(--m)'}}>
+                      <span style={{color:'var(--green)'}}>{fmt(d.grossCV)}</span> CV
+                      {d.baseLoan > 0 && <span> − <span style={{color:'var(--amber)'}}>{fmt(d.baseLoan)}</span> existing loans</span>}
+                      {d.dibsLoan > 0 && <span> − <span style={{color:'var(--amber)'}}>{fmt(d.dibsLoan)}</span> DIBS loans</span>}
+                      <span> = <span style={{color:'var(--cyan)',fontWeight:600}}>{fmt(d.netBorrowable)}</span> borrowable</span>
+                    </td>
+                  </tr>
+                ))}
+                {isExpanded && locs.length>0 && (
+                  <tr style={{background:'rgba(15,23,42,.6)'}}>
+                    <td style={{paddingLeft:20,color:'#475569',fontSize:10,fontWeight:400}}>Credit Lines</td>
+                    <td colSpan={policies.length + (locs.length>0?1:0) + 1} style={{fontSize:10,color:'#94a3b8',fontFamily:'var(--m)'}}>
+                      {locs.map((l,i) => {
+                        const limit = Number(l.creditLimit||0); const bal = Number(l.currentBalance||0); const avail = Math.max(0,limit-bal);
+                        return <span key={l.id}>{i>0?' + ':''}<span style={{color:'var(--blue)'}}>{fmt(limit)}</span> limit − <span style={{color:'var(--amber)'}}>{fmt(bal)}</span> bal = <span style={{color:'var(--blue)'}}>{fmt(avail)}</span>{l.name?' ('+l.name+')':''}</span>;
+                      })}
+                      <span> = <span style={{color:'var(--blue)',fontWeight:600}}>{fmt(locAvailStatic)}</span> total LOC</span>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>);
             });
           })()}
         </tbody></table></div>
@@ -1453,7 +1482,7 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
 
   let totalCV = 0, totalLoans = 0;
   policies.forEach(p => { const cur = getCurrentActualsEnhanced(p); totalCV += cur.cashValue; totalLoans += getLatestLoan(p); });
-  const ibcBorrowable = Math.max(0, totalCV * 0.9 - totalLoans);
+  const ibcBorrowable = Math.max(0, totalCV - totalLoans);
   const locAvailable = locs.reduce((s, l) => s + Math.max(0, Number(l.creditLimit||0) - Number(l.currentBalance||0)), 0);
   const totalBorrowable = ibcBorrowable + locAvailable;
 
@@ -1515,7 +1544,7 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
         }
         const baseLoan = getLatestLoan(p);
         const dibsLoan = dibsImpact[p.id] || 0;
-        totalProjBorrowable += Math.max(0, cv * 0.9 - baseLoan - dibsLoan);
+        totalProjBorrowable += Math.max(0, cv - baseLoan - dibsLoan);
       });
       totalProjBorrowable += locAvailable;
 
@@ -1566,7 +1595,7 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
     </div>}
 
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12,marginBottom:18}}>
-      <SummaryCard label="IBC Borrowable" value={fmt(ibcBorrowable)} sub="90% CV − loans" color="var(--green)" />
+      <SummaryCard label="IBC Borrowable" value={fmt(ibcBorrowable)} sub="CV − loans" color="var(--green)" />
       {locs.length>0&&<SummaryCard label="LOC Available" value={fmt(locAvailable)} color="var(--green)" />}
       <SummaryCard label="Total Available" value={fmt(totalBorrowable)} color="var(--green)" />
       <SummaryCard label="Deal Committed" value={fmt(totalCommitted)} sub={`${activeDeals.length} deals`} color="var(--amber)" />
