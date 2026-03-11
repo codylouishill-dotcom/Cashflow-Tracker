@@ -568,12 +568,69 @@ function prefillActuals(policy) {
   if (!policy.illustration.length || !policy.startDate) return policy;
   const start = ibcParseDate(policy.startDate);
   const actuals = { ...policy.actuals };
+  const startYear = start.getFullYear();
+
+  // Illustration Year 1 = values at policy start (immediate CV, base DB)
+  // Illustration Year 2 = values at first renewal (startYear + 1)
+  // Illustration Year N = values at (N-1)th renewal (startYear + N - 1)
   policy.illustration.forEach(row => {
-    const annivYear = start.getFullYear() + row.year - 1;
-    if (!actuals[annivYear]) actuals[annivYear] = { cashValue: String(row.ngCV), deathBenefit: String(row.ngDB) };
+    const calendarYear = startYear + row.year - 1; // Year 1 → startYear, Year 2 → startYear+1, etc.
+    if (!actuals[calendarYear]) {
+      if (row.year === 1) {
+        // Year 1 = policy start: CV is immediate, DB stays at base until first renewal
+        actuals[calendarYear] = {
+          cashValue: String(row.ngCV),
+          deathBenefit: String(policy.baseDeathBenefit || row.ngDB),
+        };
+      } else {
+        // Year 2+ = renewal values: both CV and DB update
+        actuals[calendarYear] = {
+          cashValue: String(row.ngCV),
+          deathBenefit: String(row.ngDB),
+        };
+      }
+    }
   });
   return { ...policy, actuals };
 }
+
+// Get current values accounting for CV/DB timing differences
+// CV: updates immediately at policy start (illustration Year 1), then at each renewal anniversary
+// DB: stays at base death benefit until first renewal, then updates at each anniversary
+const getCurrentActualsEnhanced = (p) => {
+  if (!p.startDate) return getCurrentActuals(p);
+
+  const start = ibcParseDate(p.startDate);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const startYear = start.getFullYear();
+
+  // CV: available from policy start, use most recent year with data that has occurred
+  const currentPY = getCurrentPolicyYear(p.startDate);
+  const currentAnnivYear = startYear + currentPY - 1;
+  const cvYears = Object.keys(p.actuals||{}).map(Number).filter(y => y <= currentAnnivYear).sort((a,b) => a-b);
+  let cv = 0, db = Number(p.baseDeathBenefit || 0);
+
+  if (cvYears.length > 0) {
+    const latestCVYear = cvYears[cvYears.length - 1];
+    cv = Number(p.actuals[latestCVYear]?.cashValue || 0);
+  }
+
+  // DB: stays at base until first renewal anniversary passes
+  // First renewal = illustration Year 2 values, occurs at startYear + 1 anniversary
+  const firstAnniv = getAnniversaryForYear(p.startDate, 1);
+  const firstAnnivPassed = firstAnniv ? today >= firstAnniv : false;
+
+  if (firstAnnivPassed) {
+    // DB can now use renewal data (calendar years after start year)
+    const dbYears = Object.keys(p.actuals||{}).map(Number).filter(y => y <= currentAnnivYear && y > startYear).sort((a,b) => a-b);
+    if (dbYears.length > 0) {
+      const latestDBYear = dbYears[dbYears.length - 1];
+      db = Number(p.actuals[latestDBYear]?.deathBenefit || db);
+    }
+  }
+
+  return { cashValue: cv, deathBenefit: db };
+};
 
 
 // ═══════════════════════════════════════════════
@@ -886,6 +943,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
   const [editingPolicyId, setEditingPolicyId] = useState(null);
   const [openYears, setOpenYears] = useState({}); // keyed by "policyId-year"
   const toggleYr = (pid, yr) => { const k = pid+'-'+yr; setOpenYears(prev => ({...prev,[k]:!prev[k]})); };
+  const [projSelectedIds, setProjSelectedIds] = useState(null); // null = all
 
   const toggleExpand = (id) => { const next = policies.map(p => p.id===id ? {...p, expanded:!p.expanded} : p); persistIBCPolicies(next); };
   const updatePolicyField = (pid, field, value) => { const next = policies.map(p => p.id===pid ? {...p, [field]: value} : p); persistIBCPolicies(next); };
@@ -908,7 +966,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
 
   const totals = useMemo(() => {
     let cv=0, loans=0, db=0;
-    policies.forEach(p => { const cur = getCurrentActuals(p); cv += cur.cashValue; db += cur.deathBenefit; loans += getLatestLoan(p); });
+    policies.forEach(p => { const cur = getCurrentActualsEnhanced(p); cv += cur.cashValue; db += cur.deathBenefit; loans += getLatestLoan(p); });
     return { cashValue:cv, loans, netCashValue:cv-loans, deathBenefit:db, borrowable:Math.max(0,cv*0.9-loans) };
   }, [policies]);
 
@@ -978,7 +1036,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
       {policies.length > 0 && <div className="ibc-tw"><table className="ibc-table"><thead><tr>
         <th>Policy</th><th>Insured</th><th>Start</th><th>Cash Value</th><th>Loans</th><th>Net CV</th><th>Death Benefit</th>
       </tr></thead><tbody>
-        {policies.map(p => { const cur=getCurrentActuals(p); const lb=getLatestLoan(p); return (<tr key={p.id}>
+        {policies.map(p => { const cur=getCurrentActualsEnhanced(p); const lb=getLatestLoan(p); return (<tr key={p.id}>
           <td>{p.name||'Unnamed'}</td><td style={{color:'#475569'}}>{p.insured||'—'}</td>
           <td style={{color:'#475569'}}>{p.startDate?ibcFormatDate(ibcParseDate(p.startDate)):'—'}</td>
           <td style={{color:'var(--green)'}}>{fmt(cur.cashValue)}</td>
@@ -999,7 +1057,7 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
     {subTab==='policies'&&<div>
       {policies.length===0&&<div style={{padding:40,textAlign:'center',color:'#475569',fontFamily:'var(--m)'}}>No policies added.</div>}
       {policies.map(p => {
-        const cv = getCurrentActuals(p).cashValue;
+        const cv = getCurrentActualsEnhanced(p).cashValue;
         const lb = getLatestLoan(p);
         const na = getNextAnniversary(p.startDate);
         const dtr = na ? daysBetween(new Date(), na) : null;
@@ -1007,11 +1065,18 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
         const isForecast = (yr) => {
           if (p.actualYears && p.actualYears[yr]) return false;
           const sY = p.startDate ? ibcParseDate(p.startDate).getFullYear() : 2025;
-          const py = yr - sY + 1;
-          const illusRow = p.illustration.find(r => r.year === py);
+          // Illustration Year N → calendar year startYear + N - 1
+          // So calendar year yr → illustration year (yr - sY + 1)
+          const illusYear = yr - sY + 1;
+          if (illusYear < 1) return false;
+          const illusRow = p.illustration.find(r => r.year === illusYear);
           if (!illusRow) return false;
           const act = p.actuals[yr];
           if (!act) return false;
+          // For year 1 (start year), DB was prefilled from baseDeathBenefit, not illustration
+          if (illusYear === 1) {
+            return String(act.cashValue) === String(illusRow.ngCV) && (String(act.deathBenefit) === String(p.baseDeathBenefit) || String(act.deathBenefit) === String(illusRow.ngDB));
+          }
           return String(act.cashValue) === String(illusRow.ngCV) && String(act.deathBenefit) === String(illusRow.ngDB);
         };
         const getYearEndLoan = (yr) => { const mks=[]; for(let m=1;m<=12;m++){const k=`${yr}-${String(m).padStart(2,'0')}`; if(p.monthlyLoans&&p.monthlyLoans[k]!==undefined)mks.push(k);} if(!mks.length)return 0; mks.sort(); return Number(p.monthlyLoans[mks[mks.length-1]]||0); };
@@ -1129,19 +1194,94 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
     {/* ── Projections ── */}
     {subTab==='projections'&&<div>
       {(()=>{
-        const pol = policies[0];
-        if (!pol || !pol.illustration.length) return <div style={{padding:40,textAlign:'center',color:'#475569'}}>No illustration data. Upload a policy PDF to see projections.</div>;
-        const data = pol.illustration;
+        const withData = policies.filter(p => p.illustration.length > 0);
+        if (!withData.length) return <div style={{padding:40,textAlign:'center',color:'#475569'}}>No illustration data. Upload a policy PDF to see projections.</div>;
+
+        // Selected policies — null means all
+        const selectedIds = projSelectedIds || withData.map(p => p.id);
+        const selected = withData.filter(p => selectedIds.includes(p.id));
+        const isSingle = selected.length === 1;
+        const isAll = selected.length === withData.length;
+
+        // Toggle a policy in/out of selection
+        const togglePolicy = (id) => {
+          const current = projSelectedIds || withData.map(p => p.id);
+          const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
+          if (next.length === 0) return; // don't allow empty
+          setProjSelectedIds(next.length === withData.length ? null : next);
+        };
+
+        // Build combined year rows from all selected policies
+        const allYears = new Set();
+        selected.forEach(p => p.illustration.forEach(r => allYears.add(r.year)));
+        const yearList = [...allYears].sort((a,b) => a - b);
+
         return (<div>
-          <div style={{fontSize:15,fontWeight:700,marginBottom:12}}>Projected Values — {pol.name}</div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10,marginBottom:16}}>
-            {[5,10,20,30].map(yr=>{const r=data.find(d=>d.year===yr); if(!r)return null; return <SummaryCard key={yr} label={`Year ${yr}`} value={fmt(r.ngCV)} sub={`Age ${r.age}`} color="var(--green)" />;})}
-          </div>
-          <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Age</th><th>Yr</th><th>Premium</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
-            {data.map((r,i)=>{let tp=0;for(let j=0;j<=i;j++)tp+=data[j].premium;const rat=tp>0?((r.ngCV/tp)*100).toFixed(1):'0.0';
-              return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{r.age}</td><td>{r.year}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
+          <div style={{fontSize:15,fontWeight:700,marginBottom:10}}>Projected Cash Value & Death Benefit</div>
+
+          {/* Policy selector chips */}
+          {withData.length > 1 && <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:14}}>
+            <button onClick={()=>setProjSelectedIds(null)} style={{
+              padding:'5px 12px',borderRadius:20,border:'1px solid '+(isAll?'rgba(34,197,94,.3)':'#1e293b'),
+              background:isAll?'rgba(34,197,94,.08)':'transparent',color:isAll?'var(--green)':'#475569',
+              fontSize:10,fontWeight:600,cursor:'pointer',fontFamily:'var(--m)',transition:'all .15s',
+            }}>All Policies</button>
+            {withData.map(p => {
+              const active = selectedIds.includes(p.id);
+              return <button key={p.id} onClick={()=>togglePolicy(p.id)} style={{
+                padding:'5px 12px',borderRadius:20,border:'1px solid '+(active?'rgba(6,182,212,.3)':'#1e293b'),
+                background:active?'rgba(6,182,212,.08)':'transparent',color:active?'var(--cyan)':'#475569',
+                fontSize:10,fontWeight:600,cursor:'pointer',fontFamily:'var(--m)',transition:'all .15s',
+              }}>{p.name||'Unnamed'}{p.insured?' ('+p.insured+')':''}</button>;
             })}
-          </tbody></table></div>
+          </div>}
+
+          {/* Milestone summary cards */}
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:16}}>
+            {[5,10,20,30].map(yr => {
+              let totalCV = 0, label = '';
+              selected.forEach(p => { const r = p.illustration.find(d => d.year === yr); if (r) totalCV += r.ngCV; });
+              if (totalCV === 0) return null;
+              if (isSingle) { const r = selected[0].illustration.find(d => d.year === yr); label = r ? `Age ${r.age}` : ''; }
+              else { label = `${selected.length} policies`; }
+              return <SummaryCard key={yr} label={`Year ${yr}`} value={fmt(totalCV)} sub={label} color="var(--green)" />;
+            })}
+          </div>
+
+          {/* Single policy: detailed table */}
+          {isSingle && (()=>{
+            const pol = selected[0];
+            const data = pol.illustration;
+            return <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr><th>Age</th><th>Yr</th><th>Premium</th><th>Cash Value</th><th>Death Benefit</th><th>Dividend</th><th>CV/Prem</th></tr></thead><tbody>
+              {data.map((r,i)=>{let tp=0;for(let j=0;j<=i;j++)tp+=data[j].premium;const rat=tp>0?((r.ngCV/tp)*100).toFixed(1):'0.0';
+                return(<tr key={r.year} className={[5,10,20,30].includes(r.year)?'hl':''}><td>{r.age}</td><td>{r.year}</td><td>{r.premium>0?fmt(r.premium):'—'}</td><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td><td style={{color:'#475569'}}>{fmt(r.div)}</td><td style={{color:Number(rat)>=100?'var(--green)':'#475569'}}>{rat}%</td></tr>);
+              })}
+            </tbody></table></div>;
+          })()}
+
+          {/* Multiple policies: combined table with per-policy CV columns + totals */}
+          {!isSingle && <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr>
+            <th>Yr</th>
+            {selected.map(p => <React.Fragment key={p.id}>
+              <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} CV</th>
+              <th>{(p.name||'Policy').split(' ').slice(0,2).join(' ')} DB</th>
+            </React.Fragment>)}
+            {selected.length > 1 && <><th>Total CV</th><th>Total DB</th></>}
+          </tr></thead><tbody>
+            {yearList.map(yr => {
+              let tCV = 0, tDB = 0;
+              const cells = selected.map(p => {
+                const r = p.illustration.find(x => x.year === yr);
+                if (!r) return <React.Fragment key={p.id}><td style={{color:'#475569'}}>—</td><td style={{color:'#475569'}}>—</td></React.Fragment>;
+                tCV += r.ngCV; tDB += r.ngDB;
+                return <React.Fragment key={p.id}><td style={{color:'var(--green)'}}>{fmt(r.ngCV)}</td><td style={{color:'var(--purple)'}}>{fmt(r.ngDB)}</td></React.Fragment>;
+              });
+              return <tr key={yr} className={[5,10,20,30].includes(yr)?'hl':''}>
+                <td>{yr}</td>{cells}
+                {selected.length > 1 && <><td style={{color:'var(--green)',fontWeight:600}}>{fmt(tCV)}</td><td style={{color:'var(--purple)',fontWeight:600}}>{fmt(tDB)}</td></>}
+              </tr>;
+            })}
+          </tbody></table></div>}
         </div>);
       })()}
     </div>}
@@ -1164,7 +1304,9 @@ function IBCSection({ policies, setPolicies, locs, setLocs, deals, setDeals, tra
             let tB=0;
             const cells=policies.map(p=>{const r=p.illustration.find(x=>x.year===yr);if(!r)return<td key={p.id} style={{color:'#475569'}}>—</td>;const b=Math.round(r.ngCV*0.9);tB+=b;return<td key={p.id} style={{color:'var(--green)'}}>{fmt(b)}</td>;});
             const sYr=policies[0]?.startDate?ibcParseDate(policies[0].startDate).getFullYear():currentYear;
-            return(<tr key={yr} className={[5,10,20,30].includes(yr)?'hl':''}><td>Yr {yr}</td><td style={{color:'#475569'}}>{sYr+yr-1}</td>{cells}{policies.length>1&&<td style={{color:'var(--green)',fontWeight:600}}>{fmt(tB)}</td>}</tr>);
+            const calYr = sYr + yr - 1; // Year 1 → startYear, Year 2 → startYear+1, etc.
+            const label = yr === 1 ? 'Start' : `Renewal ${yr-1}`;
+            return(<tr key={yr} className={[5,10,20,30].includes(yr)?'hl':''}><td>{label}</td><td style={{color:'#475569'}}>{calYr}</td>{cells}{policies.length>1&&<td style={{color:'var(--green)',fontWeight:600}}>{fmt(tB)}</td>}</tr>);
           })}
         </tbody></table></div>
       </div>}
@@ -1190,7 +1332,7 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
   const FORECAST_MONTHS = 240; // 20 years
 
   let totalCV = 0, totalLoans = 0;
-  policies.forEach(p => { const cur = getCurrentActuals(p); totalCV += cur.cashValue; totalLoans += getLatestLoan(p); });
+  policies.forEach(p => { const cur = getCurrentActualsEnhanced(p); totalCV += cur.cashValue; totalLoans += getLatestLoan(p); });
   const ibcBorrowable = Math.max(0, totalCV * 0.9 - totalLoans);
   const locAvailable = locs.reduce((s, l) => s + Math.max(0, Number(l.creditLimit||0) - Number(l.currentBalance||0)), 0);
   const totalBorrowable = ibcBorrowable + locAvailable;
@@ -1223,18 +1365,34 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
     }
     return months.map(m => {
       // Project policy CVs forward using illustration data
+      // Illustration Year 1 = start values, Year 2 = first renewal, Year N = (N-1)th renewal
+      // CV updates immediately; DB updates at renewals only
       let totalProjBorrowable = 0;
       policies.forEach(p => {
-        let cv = getCurrentActuals(p).cashValue;
+        let cv = getCurrentActualsEnhanced(p).cashValue;
         if (p.startDate && p.illustration.length) {
           const start = ibcParseDate(p.startDate);
           const annivMonth = start.getMonth();
-          let py;
-          if (m.date.getMonth() > annivMonth || (m.date.getMonth() === annivMonth)) { py = m.date.getFullYear() - start.getFullYear() + 1; }
-          else { py = m.date.getFullYear() - start.getFullYear(); }
-          py = Math.max(1, py);
-          const row = p.illustration.find(r => r.year === py);
+          const annivDay = start.getDate();
+          // How many renewals have occurred by month m?
+          let renewalsPassed;
+          if (m.date.getMonth() > annivMonth || (m.date.getMonth() === annivMonth && m.date.getDate() >= annivDay)) {
+            renewalsPassed = m.date.getFullYear() - start.getFullYear();
+          } else {
+            renewalsPassed = m.date.getFullYear() - start.getFullYear() - 1;
+          }
+          renewalsPassed = Math.max(0, renewalsPassed);
+          // renewalsPassed=0 → still in first year → illustration Year 1
+          // renewalsPassed=1 → first renewal passed → illustration Year 2
+          // renewalsPassed=N → illustration Year N+1
+          const illusYear = renewalsPassed + 1;
+          const row = p.illustration.find(r => r.year === illusYear);
           if (row) cv = row.ngCV;
+          else {
+            // Find closest earlier illustration year
+            const earlier = p.illustration.filter(r => r.year <= illusYear).sort((a,b) => b.year - a.year);
+            if (earlier.length) cv = earlier[0].ngCV;
+          }
         }
         const baseLoan = getLatestLoan(p);
         totalProjBorrowable += Math.max(0, cv * 0.9 - baseLoan);
@@ -1266,8 +1424,6 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
   }, [policies, deals, locs, trackedFlips, largestFlipByYear]);
 
   const firstGap = timeline.find(m => m.isGap);
-  const [showAll, setShowAll] = useState(false);
-  const displayTimeline = showAll ? timeline : timeline.slice(0, 24);
 
   // Build yearly summary for the overview
   const yearlySummary = useMemo(() => {
@@ -1297,14 +1453,19 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
       <SummaryCard label="Headroom" value={fmt(headroom)} color={headroom>=0?'var(--green)':'var(--red)'} />
     </div>
 
-    {/* Yearly LOC Needs Summary */}
+    {/* Yearly LOC Needs — 20 year view */}
     <div style={{marginBottom:20}}>
-      <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Largest Flip LOC Need by Year</div>
-      <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginBottom:8}}>Projected from cashflow simulation — shows the biggest single flip you'll deploy each year</div>
-      <div className="ibc-tw"><table className="ibc-table"><thead><tr>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+        <div>
+          <div style={{fontSize:13,fontWeight:700}}>Largest Flip LOC Need by Year</div>
+          <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)'}}>Projected from cashflow simulation — shows the biggest single flip you'll deploy each year</div>
+        </div>
+        <Btn onClick={addDeal} color="#f59e0b" small>+ Deal</Btn>
+      </div>
+      <div className="ibc-tw scroll"><table className="ibc-table"><thead><tr>
         <th>Year</th><th>Largest Flip</th><th>Proj. Borrowable</th><th>Headroom</th><th></th>
       </tr></thead><tbody>
-        {yearlySummary.slice(0, showAll ? 20 : 8).map(yr => (<tr key={yr.year} style={yr.worstGap<0?{background:'rgba(239,68,68,.04)'}:yr.year===today.getFullYear()?{background:'rgba(34,197,94,.04)'}:{}}>
+        {yearlySummary.slice(0, 20).map(yr => (<tr key={yr.year} style={yr.worstGap<0?{background:'rgba(239,68,68,.04)'}:yr.year===today.getFullYear()?{background:'rgba(34,197,94,.04)'}:{}}>
           <td style={{fontWeight:yr.year===today.getFullYear()?600:400}}>{yr.year}{yr.year===today.getFullYear()?' ←':''}</td>
           <td style={{color:'var(--cyan)',fontWeight:600}}>{fmt(yr.largestFlip)}</td>
           <td style={{color:'var(--green)'}}>{fmt(yr.projBorrowable)}</td>
@@ -1330,30 +1491,6 @@ function IBCGapAnalysis({ policies, deals, locs, trackedFlips, combinedRows, add
         </tr>);})}
       </tbody></table></div>
     </div>}
-
-    {/* Timeline Forecast */}
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-      <div>
-        <div style={{fontSize:13,fontWeight:700}}>{showAll?'20-Year':'24-Month'} LOC Forecast</div>
-        <div style={{fontFamily:'var(--m)',fontSize:10,color:'#475569'}}>Projected borrowable vs flip + deal commitments</div>
-      </div>
-      <div style={{display:'flex',gap:6}}>
-        <Btn onClick={addDeal} color="#f59e0b" small>+ Deal</Btn>
-        <Btn onClick={()=>setShowAll(!showAll)} color="#06b6d4" small>{showAll?'24 Months':'20 Years'}</Btn>
-      </div>
-    </div>
-    <div className="ibc-tw scroll" style={{maxHeight:showAll?600:400}}><table className="ibc-table"><thead><tr>
-      <th>Month</th><th>Proj. Borrowable</th><th>Largest Flip</th><th>Deal Capital</th><th>Headroom</th><th></th>
-    </tr></thead><tbody>
-      {displayTimeline.map(m=>(<tr key={m.key} style={m.isGap?{background:'rgba(239,68,68,.04)'}:m.key===currentMonth?{background:'rgba(34,197,94,.04)'}:{}}>
-        <td style={{fontWeight:m.key===currentMonth?600:400}}>{m.label}{m.key===currentMonth?' ←':''}</td>
-        <td style={{color:'var(--green)'}}>{fmt(m.projBorrowable)}</td>
-        <td style={{color:m.largestFlip>0?'var(--cyan)':'#334155'}}>{m.largestFlip>0?fmt(m.largestFlip):'—'}</td>
-        <td style={{color:m.standardCommitted>0?'var(--amber)':'#334155'}}>{m.standardCommitted>0?fmt(m.standardCommitted):'—'}</td>
-        <td style={{color:m.gap>=0?'var(--green)':'var(--red)',fontWeight:m.isGap?600:400}}>{fmt(m.gap)}</td>
-        <td>{m.isGap?<span className="badge badge-r">GAP</span>:m.gap<totalBorrowable*0.2&&(m.largestFlip>0||m.standardCommitted>0)?<span className="badge badge-w">Tight</span>:''}</td>
-      </tr>))}
-    </tbody></table></div>
 
     {/* Deal Capacity Planner */}
     <div style={{marginTop:20,background:'#0f172a',border:'1px solid #1e293b',borderRadius:8,padding:16}}>
@@ -1416,7 +1553,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editMonth, setEditMonth] = useState('');
-  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false, isDibs:false, dibsSourceLocId:'', dibsDestPolicyId:'' });
+  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false, isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'' });
   const [editingFlipId, setEditingFlipId] = useState(null);
   const [exportData, setExportData] = useState(null);
   const [importData, setImportData] = useState('');
@@ -1615,11 +1752,11 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     if (!newFlipForm.name || !newFlipForm.startDate) return;
     const f = {
       id: uid(), name: newFlipForm.name, amount: newFlipForm.amount, startDate: newFlipForm.startDate,
-      dibs: newFlipForm.isDibs ? { sourceLocId: newFlipForm.dibsSourceLocId, destPolicyId: newFlipForm.dibsDestPolicyId } : null,
+      dibs: newFlipForm.isDibs ? { sourceType: newFlipForm.dibsSourceType, sourceId: newFlipForm.dibsSourceId, destPolicyId: newFlipForm.dibsDestPolicyId } : null,
       splits: [{ id: uid(), name: 'Main', amount: newFlipForm.amount, yield: newFlipForm.yield, durationYears: newFlipForm.durationYears, monthlyPmt: monthlyPmt(newFlipForm.amount, newFlipForm.yield/100, newFlipForm.durationYears), indexFund: newFlipForm.indexFund || false, actualCF: {} }],
     };
     persistFlips([...trackedFlips, f]);
-    setNewFlipForm({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false, isDibs:false, dibsSourceLocId:'', dibsDestPolicyId:'' });
+    setNewFlipForm({ name:'', amount:9500, yield:8, startDate:'', durationYears:3, indexFund:false, isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'' });
   };
   const removeFlip = (id) => persistFlips(trackedFlips.filter(f=>f.id!==id));
   const updateFlip = (id, field, value) => { const next = trackedFlips.map(f => { if(f.id!==id)return f; const u={...f,[field]:value}; if(['amount','yield','durationYears'].includes(field))u.monthlyPmt=monthlyPmt(u.amount,(u.yield||8)/100,u.durationYears); return u; }); persistFlips(next); };
@@ -1695,7 +1832,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <Card label="Desired Withdrawal" value={fmt(desiredMonthlyWithdrawal)} sub="/mo at freedom" color="#a78bfa" icon="💰"/>
             <Card label="Tracked Flips" value={trackedFlips.length} sub={`${actualCount} months of actuals`} color="#f59e0b" icon="🔄"/>
             <Card label="CF Depleted" value={cfDepletedDate?fmtDate(cfDepletedDate):"Not Depleted"} color={cfDepletedDate?"#ef4444":"#22c55e"} icon={cfDepletedDate?"⚠️":"✅"}/>
-            {ibcPolicies.length>0&&<Card label="IBC Cash Value" value={fmt(ibcPolicies.reduce((s,p)=>s+getCurrentActuals(p).cashValue,0))} sub={`${ibcPolicies.length} policies`} color="#22c55e" icon="🛡️"/>}
+            {ibcPolicies.length>0&&<Card label="IBC Cash Value" value={fmt(ibcPolicies.reduce((s,p)=>s+getCurrentActualsEnhanced(p).cashValue,0))} sub={`${ibcPolicies.length} policies`} color="#22c55e" icon="🛡️"/>}
           </div>
           <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:18}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,flexWrap:'wrap',gap:8}}>
@@ -1773,9 +1910,28 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             </div>
             {newFlipForm.isDibs&&<div style={{marginTop:10,padding:10,background:'rgba(96,165,250,.06)',border:'1px solid rgba(96,165,250,.12)',borderRadius:6}}>
               <div style={{fontSize:10,fontWeight:600,color:'var(--blue)',fontFamily:'var(--m)',marginBottom:6}}>DIBS Linking</div>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-                <div style={{flex:'1 1 200px'}}><Inp label="Source LOC" value={newFlipForm.dibsSourceLocId} onChange={v=>setNewFlipForm({...newFlipForm,dibsSourceLocId:v})} type="text" note="LOC name/ID" small /></div>
-                <div style={{flex:'1 1 200px'}}><Inp label="Dest IBC Policy" value={newFlipForm.dibsDestPolicyId} onChange={v=>setNewFlipForm({...newFlipForm,dibsDestPolicyId:v})} type="text" note="Policy name/ID" small /></div>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
+                <div style={{flex:'1 1 120px'}} className="ibc-field"><label>Source Type</label>
+                  <select value={newFlipForm.dibsSourceType} onChange={e=>setNewFlipForm({...newFlipForm,dibsSourceType:e.target.value,dibsSourceId:''})}>
+                    <option value="loc">Credit Line (LOC)</option>
+                    <option value="policy">IBC Policy Loan</option>
+                  </select>
+                </div>
+                <div style={{flex:'1 1 200px'}} className="ibc-field"><label>{newFlipForm.dibsSourceType==='policy'?'Source Policy':'Source LOC'}</label>
+                  <select value={newFlipForm.dibsSourceId} onChange={e=>setNewFlipForm({...newFlipForm,dibsSourceId:e.target.value})}>
+                    <option value="">Select...</option>
+                    {newFlipForm.dibsSourceType==='policy'
+                      ? ibcPolicies.map(p=><option key={p.id} value={p.id}>{p.name||'Unnamed'}{p.insured?' ('+p.insured+')':''}</option>)
+                      : ibcLocs.map(l=><option key={l.id} value={l.id}>{l.name||'Unnamed'}{l.lender?' — '+l.lender:''}</option>)
+                    }
+                  </select>
+                </div>
+                <div style={{flex:'1 1 200px'}} className="ibc-field"><label>Destination IBC Policy</label>
+                  <select value={newFlipForm.dibsDestPolicyId} onChange={e=>setNewFlipForm({...newFlipForm,dibsDestPolicyId:e.target.value})}>
+                    <option value="">Select...</option>
+                    {ibcPolicies.map(p=><option key={p.id} value={p.id}>{p.name||'Unnamed'}{p.insured?' ('+p.insured+')':''}</option>)}
+                  </select>
+                </div>
               </div>
             </div>}
           </div>
@@ -1795,7 +1951,9 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                   <div style={{fontSize:10,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>
                     {fmt(f.amount)} · {fmtDate(fStart)} → {fmtDate(fEnd)} · Pmt: {fmt(pmt)}/mo
                   </div>
-                  {f.dibs&&<div style={{fontSize:9,color:'var(--blue)',fontFamily:'var(--m)',marginTop:2}}>LOC: {f.dibs.sourceLocId||'—'} → Policy: {f.dibs.destPolicyId||'—'}</div>}
+                  {f.dibs&&<div style={{fontSize:9,color:'var(--blue)',fontFamily:'var(--m)',marginTop:2}}>
+                    {(()=>{ const srcName = f.dibs.sourceType==='policy' ? (ibcPolicies.find(p=>p.id===f.dibs.sourceId)?.name||f.dibs.sourceId||'—') : (ibcLocs.find(l=>l.id===f.dibs.sourceId)?.name||f.dibs.sourceLocId||f.dibs.sourceId||'—'); const destName = ibcPolicies.find(p=>p.id===f.dibs.destPolicyId)?.name||f.dibs.destPolicyId||'—'; return `${f.dibs.sourceType==='policy'?'Policy':'LOC'}: ${srcName} → Policy: ${destName}`; })()}
+                  </div>}
                   {splits.length===1&&<div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginTop:1}}>
                     @ {splits[0].yield}% · {splits[0].durationYears}yr
                     {splits[0].indexFund && <span style={{color:'#f97316'}}> · Index Fund · Net: {fmt(avgIndexFundNetPmt(splits[0].amount, pmt, Math.round(splits[0].durationYears*12)))}/mo</span>}
@@ -1817,7 +1975,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                   <Inp label="Start" value={f.startDate} onChange={v=>updateFlip(f.id,'startDate',v)} type="text" small style={{flex:'1 1 130px'}}/>
                   <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,paddingBottom:2}}>
                     <div style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer'}} onClick={()=>{
-                      const newDibs = f.dibs ? null : { sourceLocId: '', destPolicyId: '' };
+                      const newDibs = f.dibs ? null : { sourceType: 'loc', sourceId: '', destPolicyId: '' };
                       updateFlip(f.id, 'dibs', newDibs);
                     }}>
                       <div style={{width:15,height:15,borderRadius:3,border:'1px solid '+(f.dibs?'#60a5fa':'#334155'),background:f.dibs?'#60a5fa':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{f.dibs&&<span style={{color:'#fff',fontSize:9}}>✓</span>}</div>
@@ -1826,9 +1984,29 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                   </div>
                 </div>
                 {f.dibs&&<div style={{marginBottom:10,padding:8,background:'rgba(96,165,250,.06)',border:'1px solid rgba(96,165,250,.12)',borderRadius:6}}>
-                  <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-                    <Inp label="Source LOC" value={f.dibs.sourceLocId||''} onChange={v=>updateFlip(f.id,'dibs',{...f.dibs,sourceLocId:v})} type="text" small style={{flex:'1 1 180px'}}/>
-                    <Inp label="Dest Policy" value={f.dibs.destPolicyId||''} onChange={v=>updateFlip(f.id,'dibs',{...f.dibs,destPolicyId:v})} type="text" small style={{flex:'1 1 180px'}}/>
+                  <div style={{fontSize:10,fontWeight:600,color:'var(--blue)',fontFamily:'var(--m)',marginBottom:6}}>DIBS Linking</div>
+                  <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-end'}}>
+                    <div style={{flex:'0 0 130px'}} className="ibc-field"><label>Source Type</label>
+                      <select value={f.dibs.sourceType||'loc'} onChange={e=>updateFlip(f.id,'dibs',{...f.dibs,sourceType:e.target.value,sourceId:''})}>
+                        <option value="loc">Credit Line</option>
+                        <option value="policy">IBC Policy</option>
+                      </select>
+                    </div>
+                    <div style={{flex:'1 1 180px'}} className="ibc-field"><label>{(f.dibs.sourceType||'loc')==='policy'?'Source Policy':'Source LOC'}</label>
+                      <select value={f.dibs.sourceId||''} onChange={e=>updateFlip(f.id,'dibs',{...f.dibs,sourceId:e.target.value})}>
+                        <option value="">Select...</option>
+                        {(f.dibs.sourceType||'loc')==='policy'
+                          ? ibcPolicies.map(p=><option key={p.id} value={p.id}>{p.name||'Unnamed'}{p.insured?' ('+p.insured+')':''}</option>)
+                          : ibcLocs.map(l=><option key={l.id} value={l.id}>{l.name||'Unnamed'}{l.lender?' — '+l.lender:''}</option>)
+                        }
+                      </select>
+                    </div>
+                    <div style={{flex:'1 1 180px'}} className="ibc-field"><label>Dest IBC Policy</label>
+                      <select value={f.dibs.destPolicyId||''} onChange={e=>updateFlip(f.id,'dibs',{...f.dibs,destPolicyId:e.target.value})}>
+                        <option value="">Select...</option>
+                        {ibcPolicies.map(p=><option key={p.id} value={p.id}>{p.name||'Unnamed'}{p.insured?' ('+p.insured+')':''}</option>)}
+                      </select>
+                    </div>
                   </div>
                 </div>}
                 <div style={{fontSize:9,fontWeight:700,color:'#64748b',fontFamily:'var(--m)',textTransform:'uppercase',marginBottom:6}}>Splits</div>
