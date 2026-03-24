@@ -2058,7 +2058,41 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <Card label="Tracked Flips" value={trackedFlips.length} sub={`${actualCount} months of actuals`} color="#f59e0b" icon="🔄"/>
             <Card label="CF Depleted" value={cfDepletedDate?fmtDate(cfDepletedDate):"Not Depleted"} color={cfDepletedDate?"#ef4444":"#22c55e"} icon={cfDepletedDate?"⚠️":"✅"}/>
             {ibcPolicies.length>0&&<Card label="IBC Cash Value" value={fmt(ibcPolicies.reduce((s,p)=>s+getCurrentActualsEnhanced(p).cashValue,0))} sub={`${ibcPolicies.length} policies`} color="#22c55e" icon="🛡️"/>}
+            {include401k&&(()=>{
+              const latestRow = combinedRows && combinedRows.length > 0 ? combinedRows[combinedRows.length > 60 ? 60 : combinedRows.length - 1] : null;
+              const bal401k = latestRow ? latestRow.balance401k : current401k;
+              return <Card label="401k Balance" value={fmtK(bal401k)} sub={`${fmt(monthly401kContrib)}/mo · ${annual401kYield}% yield`} color="#f59e0b" icon="🏦"/>;
+            })()}
           </div>
+
+          {/* Withdrawal breakdown at freedom */}
+          {include401k&&freedomMonth!=null&&(()=>{
+            const freedomRow = combinedRows.find(r => r.month === freedomMonth);
+            if (!freedomRow) return null;
+            const assetCFAtFreedom = freedomRow.assetCF || 0;
+            const ret401kAtFreedom = freedomRow.retirement401kMonthly || 0;
+            const totalAtFreedom = assetCFAtFreedom + ret401kAtFreedom;
+            return totalAtFreedom > 0 ? <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:'12px 16px',marginBottom:14}}>
+              <div style={{fontSize:10,fontWeight:700,color:'#64748b',fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Monthly Income at Freedom</div>
+              <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+                <div style={{flex:'1 1 140px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                  <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:2}}>Asset Cashflow</div>
+                  <div style={{fontSize:18,fontWeight:800,color:'#06b6d4',fontFamily:'var(--m)'}}>{fmt(assetCFAtFreedom)}</div>
+                  <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{totalAtFreedom>0?((assetCFAtFreedom/totalAtFreedom)*100).toFixed(0)+'% of total':'—'}</div>
+                </div>
+                <div style={{flex:'1 1 140px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid #1e293b'}}>
+                  <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:2}}>401k Withdrawal</div>
+                  <div style={{fontSize:18,fontWeight:800,color:'#f59e0b',fontFamily:'var(--m)'}}>{fmt(ret401kAtFreedom)}</div>
+                  <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>{totalAtFreedom>0?((ret401kAtFreedom/totalAtFreedom)*100).toFixed(0)+'% of total':'—'}{ret401kAtFreedom>0?' · 4% rule':''}</div>
+                </div>
+                <div style={{flex:'1 1 140px',padding:'8px 10px',background:'#020617',borderRadius:6,border:'1px solid rgba(167,139,250,.2)'}}>
+                  <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',fontWeight:700,marginBottom:2}}>Total Monthly</div>
+                  <div style={{fontSize:18,fontWeight:800,color:'#a78bfa',fontFamily:'var(--m)'}}>{fmt(totalAtFreedom)}</div>
+                  <div style={{fontSize:8,color:totalAtFreedom>=desiredMonthlyWithdrawal?'#22c55e':'#ef4444',fontFamily:'var(--m)'}}>{totalAtFreedom>=desiredMonthlyWithdrawal?'✓ Meets target':'Below target'}</div>
+                </div>
+              </div>
+            </div> : null;
+          })()}
           <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:18}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,flexWrap:'wrap',gap:8}}>
               <div><h3 style={{fontSize:14,fontWeight:700}}>Cashflow Trajectory</h3><div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>Actuals + forecast</div></div>
@@ -2342,17 +2376,25 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <div style={{overflowX:'auto',maxHeight:detailRange==='all'||detailRange==='30yr'?'none':600}}>
               <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:'var(--m)'}}>
                 <thead><tr style={{borderBottom:'2px solid #1e293b',position:'sticky',top:0,background:'#0f172a',zIndex:1}}>
-                  {['','Date','Flip#','Personal','Asset CF','W/D','LOC','Active'].map(h=>(<th key={h} style={{padding:'7px 8px',textAlign:'right',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>))}
+                  {include401k
+                    ? ['','Date','Flip#','Personal','Asset CF','401k W/D','Total CF','W/D','LOC','401k Bal','Active'].map(h=>(<th key={h} style={{padding:'7px 8px',textAlign:'right',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>))
+                    : ['','Date','Flip#','Personal','Asset CF','W/D','LOC','Active'].map(h=>(<th key={h} style={{padding:'7px 8px',textAlign:'right',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>))
+                  }
                 </tr></thead>
                 <tbody>{tRows.map((r,i)=>{const isFree=freeMonth!=null&&r.month===freeMonth;const isActual=r.source==='actual';
+                  const ret401k = r.retirement401kMonthly || 0;
+                  const totalCF = (r.assetCF||0) + ret401k;
                   return(<tr key={i} className="tb" style={{borderBottom:'1px solid #0b1120',background:isFree?'rgba(34,197,94,.07)':isActual?'rgba(6,182,212,.03)':'transparent'}}>
                     <td style={{padding:'6px 6px',textAlign:'center',width:8}}><div style={{width:6,height:6,borderRadius:'50%',background:isActual?'#22c55e':'#334155',margin:'0 auto'}}/></td>
                     <td style={{padding:'6px 8px',textAlign:'right',color:isFree?'#22c55e':'#94a3b8',fontWeight:isFree?700:400}}>{fmtDate(r.date)}{isFree&&' 🎯'}</td>
                     <td style={{padding:'6px 8px',textAlign:'right',color:'#06b6d4'}}>{r.flipNumber}</td>
                     <td style={{padding:'6px 8px',textAlign:'right',color:r.personalCash>0?'#f59e0b':'#334155'}}>{r.personalCash>0?fmt(r.personalCash):'$0'}</td>
                     <td style={{padding:'6px 8px',textAlign:'right',color:'#22d3ee',fontWeight:600}}>{fmt(r.assetCF)}</td>
+                    {include401k&&<td style={{padding:'6px 8px',textAlign:'right',color:ret401k>0?'#f59e0b':'#334155'}}>{ret401k>0?fmt(ret401k):'—'}</td>}
+                    {include401k&&<td style={{padding:'6px 8px',textAlign:'right',color:'#a78bfa',fontWeight:600}}>{fmt(totalCF)}</td>}
                     <td style={{padding:'6px 8px',textAlign:'right',color:r.monthlyWithdrawalOut>0?'#f87171':'#1e293b'}}>{r.monthlyWithdrawalOut>0?'-'+fmt(r.monthlyWithdrawalOut):'—'}</td>
                     <td style={{padding:'6px 8px',textAlign:'right',color:r.locBalance>100?'#ef4444':'#22c55e'}}>{r.locBalance<=0?'$0':fmt(r.locBalance)}</td>
+                    {include401k&&<td style={{padding:'6px 8px',textAlign:'right',color:r.balance401k>0?'#f59e0b':'#334155'}}>{r.balance401k>0?fmtK(r.balance401k):'—'}</td>}
                     <td style={{padding:'6px 8px',textAlign:'right',color:'#475569'}}>{r.activeFlipCount}</td>
                   </tr>);
                 })}</tbody>
