@@ -422,7 +422,7 @@ function simulateFromState(p, initialState) {
     if (s.loc <= 0) {
       s.loc = 0;
       const gap = m - s.lfm;
-      if (s.faa >= flipsPerAmount && gap < staleThreshold) { s.fa = Math.min(Math.round(s.fa * growthMultiplier / 500) * 500, maxFlipSize); s.faa = 0; }
+      if (s.faa >= flipsPerAmount && gap < staleThreshold) { s.fa = Math.min(Math.round(s.fa * growthMultiplier / 100) * 100, maxFlipSize); s.faa = 0; }
       const pmt = monthlyPmt(s.fa, defaultYield, flipDurationYears);
       s.flips.push({ startMonth: m, pmt, endMonth: m + Math.round(flipDurationYears * 12) });
       s.loc += s.fa; s.fc++; s.faa++; s.lfm = m; deployed = true;
@@ -444,7 +444,7 @@ function simulateFromState(p, initialState) {
     if (s.loc <= 0 && !deployed) {
       s.loc = 0;
       const gap = m - s.lfm;
-      if (s.faa >= flipsPerAmount && gap < staleThreshold) { s.fa = Math.min(Math.round(s.fa * growthMultiplier / 500) * 500, maxFlipSize); s.faa = 0; }
+      if (s.faa >= flipsPerAmount && gap < staleThreshold) { s.fa = Math.min(Math.round(s.fa * growthMultiplier / 100) * 100, maxFlipSize); s.faa = 0; }
       const pmt = monthlyPmt(s.fa, defaultYield, flipDurationYears);
       s.flips.push({ startMonth: m, pmt, endMonth: m + Math.round(flipDurationYears * 12) });
       s.loc += s.fa; s.fc++; s.faa++; s.lfm = m;
