@@ -2245,14 +2245,26 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             </div>
           </div>
 
-          {trackedFlips.map(f=>{
+          {(()=>{
+            const activeFlips = trackedFlips.filter(f => {
+              const fEnd = addMo(parseDate(f.startDate), Math.round(flipMaxDuration(f) * 12));
+              return fEnd > today;
+            });
+            const completedFlips = trackedFlips.filter(f => {
+              const fEnd = addMo(parseDate(f.startDate), Math.round(flipMaxDuration(f) * 12));
+              return fEnd <= today;
+            });
+            const [showCompleted, setShowCompleted] = useState(false);
+            const renderFlip = (f) => {
             const splits=flipSplits(f); const pmt=flipTotalPmt(f);
             const fStart=parseDate(f.startDate); const fEnd=addMo(fStart,Math.round(flipMaxDuration(f)*12));
+            const isCompleted = fEnd <= today;
             const cfMonths=[]; for(let d=addMo(fStart,1);d<=fEnd&&d<=today;d=addMo(d,1))cfMonths.push(moKey(d));
-            return(<div key={f.id} style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:18,marginBottom:14}}>
+            return(<div key={f.id} style={{background:'#0f172a',border:'1px solid '+(isCompleted?'#0f172a':'#1e293b'),borderRadius:10,padding:18,marginBottom:14,opacity:isCompleted?0.7:1}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10,flexWrap:'wrap',gap:8}}>
                 <div style={{flex:1}}>
-                  <div style={{display:'flex',alignItems:'center',gap:8}}><h4 style={{fontSize:14,fontWeight:700,color:'#06b6d4'}}>{f.name}</h4>
+                  <div style={{display:'flex',alignItems:'center',gap:8}}><h4 style={{fontSize:14,fontWeight:700,color:isCompleted?'#475569':'#06b6d4'}}>{f.name}</h4>
+                    {isCompleted&&<span className="badge" style={{background:'rgba(34,197,94,.15)',color:'#22c55e',fontSize:8,padding:'2px 6px',borderRadius:4,fontWeight:700,fontFamily:'var(--m)'}}>COMPLETED</span>}
                     {splits.length>1&&<span style={{fontSize:8,padding:'2px 6px',borderRadius:4,background:'rgba(6,182,212,.15)',color:'#06b6d4',fontWeight:700,fontFamily:'var(--m)'}}>{splits.length} SPLITS</span>}
                     {f.dibs&&<span className="badge badge-b" style={{marginLeft:4}}>DIBS</span>}
                     {splits.some(sp=>sp.indexFund)&&<span style={{fontSize:8,padding:'2px 6px',borderRadius:4,background:'rgba(249,115,22,.15)',color:'#f97316',fontWeight:700,fontFamily:'var(--m)',marginLeft:4}}>IDX</span>}
@@ -2385,8 +2397,23 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                 </div>);
               })()}
             </div>);
-          })}
-          {trackedFlips.length===0&&<div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:30,textAlign:'center'}}><div style={{fontSize:11,color:'#475569',fontFamily:'var(--m)'}}>No flips tracked yet.</div></div>}
+            };
+            return (<>
+              {activeFlips.length > 0 && <div>
+                <div style={{fontSize:11,fontWeight:700,color:'#06b6d4',fontFamily:'var(--m)',marginBottom:8,textTransform:'uppercase',letterSpacing:'.06em'}}>Active Flips ({activeFlips.length})</div>
+                {activeFlips.map(renderFlip)}
+              </div>}
+              {completedFlips.length > 0 && <div style={{marginTop:activeFlips.length>0?12:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,cursor:'pointer',padding:'8px 12px',background:'#0f172a',borderRadius:8,border:'1px solid #1e293b'}} onClick={()=>setShowCompleted(!showCompleted)}>
+                  <span style={{fontSize:10,color:showCompleted?'#22c55e':'#475569',transition:'transform .2s',transform:showCompleted?'rotate(90deg)':'rotate(0deg)'}}>▶</span>
+                  <span style={{fontSize:11,fontWeight:700,color:'#475569',fontFamily:'var(--m)',textTransform:'uppercase',letterSpacing:'.06em'}}>Completed Flips ({completedFlips.length})</span>
+                  <span style={{fontSize:9,color:'#334155',fontFamily:'var(--m)'}}>{showCompleted?'click to collapse':'click to expand'}</span>
+                </div>
+                {showCompleted && completedFlips.map(renderFlip)}
+              </div>}
+              {trackedFlips.length===0&&<div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:30,textAlign:'center'}}><div style={{fontSize:11,color:'#475569',fontFamily:'var(--m)'}}>No flips tracked yet.</div></div>}
+            </>);
+          })()}
         </div>)}
 
         {/* ═══ DETAIL TABLE ═══ */}
