@@ -1769,6 +1769,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const [showImport, setShowImport] = useState(false);
   const [detailRange, setDetailRange] = useState('default');
   const [showGapDealModal, setShowGapDealModal] = useState(false);
+  const [showCompletedFlips, setShowCompletedFlips] = useState(false);
 
   // Load from storage
   useEffect(() => {
@@ -2254,7 +2255,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
               const fEnd = addMo(parseDate(f.startDate), Math.round(flipMaxDuration(f) * 12));
               return fEnd <= today;
             });
-            const [showCompleted, setShowCompleted] = useState(false);
+            const [showCompleted, setShowCompleted] = [showCompletedFlips, setShowCompletedFlips];
             const renderFlip = (f) => {
             const splits=flipSplits(f); const pmt=flipTotalPmt(f);
             const fStart=parseDate(f.startDate); const fEnd=addMo(fStart,Math.round(flipMaxDuration(f)*12));
