@@ -403,8 +403,16 @@ function simulateFromState(p, initialState) {
   const { startMonth, startDate, desiredMonthlyWithdrawal, maxFlipSize,
     defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier,
     staleThreshold, maxMonths, currentAge, retirementAge, current401k, monthly401kContrib,
-    annual401kYield, monthlyPersonalCash, include401k } = p;
-  const monthsToRetirement = Math.max(0, (retirementAge - currentAge) * 12);
+    annual401kYield, monthlyPersonalCash, include401k, retirement401kStartDate } = p;
+  // Compute months to retirement from date if available, fallback to age-based
+  let monthsToRetirement;
+  if (retirement401kStartDate) {
+    const retDate = parseDate(retirement401kStartDate);
+    const simStart = startDate || new Date();
+    monthsToRetirement = Math.max(0, (retDate.getFullYear() - simStart.getFullYear()) * 12 + (retDate.getMonth() - simStart.getMonth()));
+  } else {
+    monthsToRetirement = Math.max(0, (retirementAge - currentAge) * 12);
+  }
 
   function step(s, m, date, postFreedom) {
     const pc = postFreedom ? 0 : monthlyPersonalCash;
@@ -1720,13 +1728,14 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const [flipsPerAmount, setFlipsPerAmount] = useState(4);
   const [growthMultiplier, setGrowthMultiplier] = useState(1.5);
   const [staleThreshold, setStaleThreshold] = useState(12);
-  const [currentAge, setCurrentAge] = useState(35);
-  const [retirementAge, setRetirementAge] = useState(60);
-  const [current401k, setCurrent401k] = useState(250000);
+  const [currentAge, setCurrentAge] = useState(35); // kept for backwards compat but hidden
+  const [retirementAge, setRetirementAge] = useState(60); // kept for backwards compat but hidden  
+  const [current401k, setCurrent401k] = useState(250000); // kept for backwards compat but hidden
   const [include401k, setInclude401k] = useState(true);
   const [monthly401kContrib, setMonthly401kContrib] = useState(1400);
   const [annual401kYield, setAnnual401kYield] = useState(7);
   const [indexFundReturn, setIndexFundReturn] = useState(10);
+  const [retirement401kStartDate, setRetirement401kStartDate] = useState('');
 
   // CF Actuals & Flips
   const [actuals, setActuals] = useState({});
@@ -1782,6 +1791,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
         if (settings.monthly401kContrib != null) setMonthly401kContrib(settings.monthly401kContrib);
         if (settings.annual401kYield != null) setAnnual401kYield(settings.annual401kYield);
         if (settings.indexFundReturn != null) setIndexFundReturn(settings.indexFundReturn);
+        if (settings.retirement401kStartDate) setRetirement401kStartDate(settings.retirement401kStartDate);
       }
       if (a) setActuals(a);
       if (f && f.length) setTrackedFlips(f);
@@ -1815,6 +1825,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
         if (settings.monthly401kContrib != null) setMonthly401kContrib(settings.monthly401kContrib);
         if (settings.annual401kYield != null) setAnnual401kYield(settings.annual401kYield);
         if (settings.indexFundReturn != null) setIndexFundReturn(settings.indexFundReturn);
+        if (settings.retirement401kStartDate) setRetirement401kStartDate(settings.retirement401kStartDate);
       }
       if (a && Object.keys(a).length > 0) setActuals(a);
       if (f && f.length > 0) setTrackedFlips(f);
@@ -1831,10 +1842,10 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       setSaving(true);
-      const s = { startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, indexFundReturn, include401k };
+      const s = { startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, indexFundReturn, include401k, retirement401kStartDate };
       saveSettings(s).then(() => setTimeout(()=>setSaving(false), 500));
     }, 800);
-  }, [loaded, startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, indexFundReturn, include401k]);
+  }, [loaded, startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, indexFundReturn, include401k, retirement401kStartDate]);
 
   const persistActuals = useCallback((a) => { setActuals(a); saveActuals(a); }, []);
   const persistFlips = useCallback((f) => { setTrackedFlips(f); saveFlips(f); }, []);
@@ -1849,6 +1860,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     const actualMonthKeys = Object.keys(actuals).sort();
     const actualRows = [];
     let runningLOC = 0;
+    let latest401kBal = current401k || 0; // carry-forward 401k from actuals
 
     for (const mk of actualMonthKeys) {
       const [yr, mo] = mk.split('-').map(Number);
@@ -1856,6 +1868,8 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       const monthIdx = (yr - sd.getFullYear()) * 12 + (mo - 1 - sd.getMonth());
       if (monthIdx < 0) continue;
       const a = actuals[mk];
+      // Update carry-forward 401k balance if entered
+      if (a.balance401k != null && a.balance401k !== '') latest401kBal = Number(a.balance401k);
       const personalCash = a.personalCash ?? 0;
       const withdrawal = a.withdrawal || 0;
       let assetCF = 0;
@@ -1879,7 +1893,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       const locInt = runningLOC * (lr / 12);
       runningLOC = Math.max(0, runningLOC + locInt - personalCash - assetCF + withdrawal);
 
-      actualRows.push({ month: monthIdx, date, flipNumber: trackedFlips.length, personalCash, assetCF, locBalance: runningLOC, currentFlipAmount: 0, balance401k: 0, retirement401kMonthly: 0, totalMonthlyCF: assetCF, monthlyWithdrawalOut: withdrawal, activeFlipCount: trackedFlips.filter(f => { const fs=parseDate(f.startDate); const fsm=(fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth()); const fem=fsm+Math.round(flipMaxDuration(f)*12); return monthIdx>=fsm&&monthIdx<=fem; }).length, source: 'actual', notes: a.notes || '' });
+      actualRows.push({ month: monthIdx, date, flipNumber: trackedFlips.length, personalCash, assetCF, locBalance: runningLOC, currentFlipAmount: 0, balance401k: latest401kBal, retirement401kMonthly: 0, totalMonthlyCF: assetCF, monthlyWithdrawalOut: withdrawal, activeFlipCount: trackedFlips.filter(f => { const fs=parseDate(f.startDate); const fsm=(fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth()); const fem=fsm+Math.round(flipMaxDuration(f)*12); return monthIdx>=fsm&&monthIdx<=fem; }).length, source: 'actual', notes: a.notes || '' });
     }
 
     const lastActual = actualRows.length > 0 ? actualRows[actualRows.length - 1] : null;
@@ -1893,7 +1907,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       let prevAmt = 0;
       for (const f of sortedFlips) { if (f.amount!==prevAmt){flipsAtAmt=0;prevAmt=f.amount;} flipsAtAmt++; cfa=f.amount; }
       const lastFlipStart = sortedFlips.length>0?(()=>{const lf=sortedFlips[sortedFlips.length-1];const fs=parseDate(lf.startDate);return(fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth());})():-999;
-      initialState = { locBalance: lastActual.locBalance||0, activeFlips: forecastFlips, flipCount: trackedFlips.length, flipsAtCurrentAmt: flipsAtAmt, currentFlipAmt: cfa, lastFlipMonth: lastFlipStart, balance401k: current401k, freedomReached: lastActual.assetCF >= desiredMonthlyWithdrawal };
+      initialState = { locBalance: lastActual.locBalance||0, activeFlips: forecastFlips, flipCount: trackedFlips.length, flipsAtCurrentAmt: flipsAtAmt, currentFlipAmt: cfa, lastFlipMonth: lastFlipStart, balance401k: latest401kBal, freedomReached: lastActual.assetCF >= desiredMonthlyWithdrawal };
     } else if (trackedFlips.length > 0) {
       const forecastFlips = trackedFlips.map(f => { const fs=parseDate(f.startDate); const fsm=(fs.getFullYear()-sd.getFullYear())*12+(fs.getMonth()-sd.getMonth()); return { id:f.id, startMonth:fsm, amount:f.amount, pmt:flipTotalPmt(f), yield:(f.yield||(f.splits?.[0]?.yield)||8)/100, endMonth:fsm+Math.round(flipMaxDuration(f)*12), indexFund:(f.indexFund||(f.splits&&f.splits.some(s=>s.indexFund)))||false, source:'actual', amount:f.amount }; });
       let cfa = startingFlipAmount, flipsAtAmt = 0;
@@ -1906,18 +1920,18 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       const nowMonth = (new Date().getFullYear()-sd.getFullYear())*12+(new Date().getMonth()-sd.getMonth());
       for (let m = firstFlipMonth; m <= nowMonth; m++) { for(const ff of forecastFlips){if(ff.startMonth===m)calcLOC+=ff.amount;} let cf=0; for(const ff of forecastFlips){if(m>ff.startMonth&&m<=ff.endMonth)cf+=ff.pmt;} calcLOC=Math.max(0,calcLOC+calcLOC*(lr/12)-monthlyPersonalCash-cf); }
       forecastStartMonth = nowMonth + 1;
-      initialState = { locBalance: calcLOC, activeFlips: forecastFlips, flipCount: trackedFlips.length, flipsAtCurrentAmt: flipsAtAmt, currentFlipAmt: cfa, lastFlipMonth: lastFlipStart, balance401k: current401k||0, freedomReached: false };
+      initialState = { locBalance: calcLOC, activeFlips: forecastFlips, flipCount: trackedFlips.length, flipsAtCurrentAmt: flipsAtAmt, currentFlipAmt: cfa, lastFlipMonth: lastFlipStart, balance401k: latest401kBal, freedomReached: false };
     } else {
       const pmt0 = monthlyPmt(startingFlipAmount, dy, flipDurationYears);
-      initialState = { locBalance: startingFlipAmount, activeFlips: [{ id: uid(), startMonth: 0, amount: startingFlipAmount, pmt: pmt0, yield: dy, endMonth: Math.round(flipDurationYears*12), source: 'forecast' }], flipCount: 1, flipsAtCurrentAmt: 1, currentFlipAmt: startingFlipAmount, lastFlipMonth: 0, balance401k: current401k||0, freedomReached: false };
+      initialState = { locBalance: startingFlipAmount, activeFlips: [{ id: uid(), startMonth: 0, amount: startingFlipAmount, pmt: pmt0, yield: dy, endMonth: Math.round(flipDurationYears*12), source: 'forecast' }], flipCount: 1, flipsAtCurrentAmt: 1, currentFlipAmt: startingFlipAmount, lastFlipMonth: 0, balance401k: latest401kBal, freedomReached: false };
       forecastStartMonth = 1;
-      actualRows.push({ month: 0, date: sd, flipNumber: 1, personalCash: monthlyPersonalCash, assetCF: 0, locBalance: startingFlipAmount, currentFlipAmount: startingFlipAmount, balance401k: current401k, retirement401kMonthly: 0, totalMonthlyCF: 0, monthlyWithdrawalOut: 0, activeFlipCount: 1, source: 'forecast' });
+      actualRows.push({ month: 0, date: sd, flipNumber: 1, personalCash: monthlyPersonalCash, assetCF: 0, locBalance: startingFlipAmount, currentFlipAmount: startingFlipAmount, balance401k: latest401kBal, retirement401kMonthly: 0, totalMonthlyCF: 0, monthlyWithdrawalOut: 0, activeFlipCount: 1, source: 'forecast' });
     }
 
-    const forecast = simulateFromState({ startMonth: forecastStartMonth, startDate: addMo(sd, forecastStartMonth), desiredMonthlyWithdrawal, maxFlipSize, defaultYield: dy, locInterestRate: lr, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, maxMonths: 600 - forecastStartMonth, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield: ay, monthlyPersonalCash, include401k }, { ...initialState, activeFlips: [...initialState.activeFlips] });
+    const forecast = simulateFromState({ startMonth: forecastStartMonth, startDate: addMo(sd, forecastStartMonth), desiredMonthlyWithdrawal, maxFlipSize, defaultYield: dy, locInterestRate: lr, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, maxMonths: 600 - forecastStartMonth, currentAge, retirementAge, current401k: latest401kBal, monthly401kContrib, annual401kYield: ay, monthlyPersonalCash, include401k, retirement401kStartDate }, { ...initialState, activeFlips: [...initialState.activeFlips] });
     const combined = [...actualRows, ...forecast.rows];
     return { combinedRows: combined, freedomDate: forecast.freedomDate || (lastActual && lastActual.assetCF >= desiredMonthlyWithdrawal ? lastActual.date : null), freedomMonth: forecast.freedomMonth, cfDepletedDate: forecast.cfDepletedDate };
-  }, [startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, actuals, trackedFlips, include401k]);
+  }, [startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, actuals, trackedFlips, include401k, retirement401kStartDate]);
 
   const idxSim = useMemo(() => simulateIndexFund({ startDate: parseDate(startDate), monthlyPersonalCash, desiredMonthlyWithdrawal, annualReturn: indexFundReturn/100, maxMonths: 600 }), [startDate, monthlyPersonalCash, desiredMonthlyWithdrawal, indexFundReturn]);
 
@@ -2059,8 +2073,10 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <Card label="CF Depleted" value={cfDepletedDate?fmtDate(cfDepletedDate):"Not Depleted"} color={cfDepletedDate?"#ef4444":"#22c55e"} icon={cfDepletedDate?"⚠️":"✅"}/>
             {ibcPolicies.length>0&&<Card label="IBC Cash Value" value={fmt(ibcPolicies.reduce((s,p)=>s+getCurrentActualsEnhanced(p).cashValue,0))} sub={`${ibcPolicies.length} policies`} color="#22c55e" icon="🛡️"/>}
             {include401k&&(()=>{
-              const latestRow = combinedRows && combinedRows.length > 0 ? combinedRows[combinedRows.length > 60 ? 60 : combinedRows.length - 1] : null;
-              const bal401k = latestRow ? latestRow.balance401k : current401k;
+              // Get 401k balance from latest actuals (carry-forward) or from simulation
+              let bal401k = current401k || 0;
+              const sortedMks = Object.keys(actuals).sort();
+              for (const mk of sortedMks) { if (actuals[mk]?.balance401k != null && actuals[mk].balance401k !== '') bal401k = Number(actuals[mk].balance401k); }
               return <Card label="401k Balance" value={fmtK(bal401k)} sub={`${fmt(monthly401kContrib)}/mo · ${annual401kYield}% yield`} color="#f59e0b" icon="🏦"/>;
             })()}
           </div>
@@ -2117,6 +2133,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
               <Inp label="Month" value={editMonth||currentMoKey} onChange={setEditMonth} type="text" note="YYYY-MM" small style={{flex:'0 0 120px'}}/>
               <Inp label="Personal Cash" value={actuals[editMonth||currentMoKey]?.personalCash??monthlyPersonalCash} onChange={v=>updateActualFn(editMonth||currentMoKey,'personalCash',v)} pre="$" step={100} small style={{flex:'1 1 120px'}}/>
               <Inp label="Withdrawal" value={actuals[editMonth||currentMoKey]?.withdrawal??0} onChange={v=>updateActualFn(editMonth||currentMoKey,'withdrawal',v)} pre="$" step={100} small style={{flex:'1 1 120px'}}/>
+              {include401k&&<Inp label="401k Balance" value={actuals[editMonth||currentMoKey]?.balance401k??''} onChange={v=>updateActualFn(editMonth||currentMoKey,'balance401k',v)} pre="$" step={1000} small note="Leave blank to carry forward" style={{flex:'1 1 140px'}}/>}
               <Inp label="Notes" value={actuals[editMonth||currentMoKey]?.notes??''} onChange={v=>updateActualFn(editMonth||currentMoKey,'notes',v)} type="text" small style={{flex:'2 1 200px'}}/>
             </div>
           </div>
@@ -2128,18 +2145,25 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <div style={{overflowX:'auto',maxHeight:500}}>
               <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:'var(--m)'}}>
                 <thead><tr style={{borderBottom:'2px solid #1e293b',position:'sticky',top:0,background:'#0f172a',zIndex:1}}>
-                  {['Month','Personal','Asset CF','W/D','Notes',''].map(h=>(<th key={h} style={{padding:'7px 8px',textAlign:'left',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase'}}>{h}</th>))}
+                  {include401k
+                    ? ['Month','Personal','Asset CF','W/D','401k Bal','Notes',''].map(h=>(<th key={h} style={{padding:'7px 8px',textAlign:'left',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase'}}>{h}</th>))
+                    : ['Month','Personal','Asset CF','W/D','Notes',''].map(h=>(<th key={h} style={{padding:'7px 8px',textAlign:'left',color:'#475569',fontSize:8,fontWeight:700,textTransform:'uppercase'}}>{h}</th>))
+                  }
                 </tr></thead>
-                <tbody>{allMonthKeys.map(mk=>{const a=actuals[mk];const hasData=a&&(a.personalCash!=null);let flipCF=0;for(const f of trackedFlips){for(const sp of flipSplits(f)){if(sp.actualCF?.[mk]!=null)flipCF+=sp.actualCF[mk];}}
+                <tbody>{(()=>{
+                  let carry401k = current401k || 0;
+                  return allMonthKeys.map(mk=>{const a=actuals[mk];const hasData=a&&(a.personalCash!=null);let flipCF=0;for(const f of trackedFlips){for(const sp of flipSplits(f)){if(sp.actualCF?.[mk]!=null)flipCF+=sp.actualCF[mk];}}
+                  if (a?.balance401k != null && a.balance401k !== '') carry401k = Number(a.balance401k);
                   return(<tr key={mk} className="tb" style={{borderBottom:'1px solid #0b1120',background:hasData?'rgba(6,182,212,.03)':'transparent',cursor:'pointer'}} onClick={()=>setEditMonth(mk)}>
                     <td style={{padding:'6px 8px',color:editMonth===mk?'#06b6d4':'#94a3b8',fontWeight:editMonth===mk?700:400}}>{mk}</td>
                     <td style={{padding:'6px 8px',color:hasData?'#f59e0b':'#1e293b'}}>{hasData?fmt(a.personalCash??0):'—'}</td>
                     <td style={{padding:'6px 8px',color:flipCF>0?'#22d3ee':'#1e293b'}}>{flipCF>0?fmt(flipCF):'—'}</td>
                     <td style={{padding:'6px 8px',color:a?.withdrawal?'#f87171':'#1e293b'}}>{a?.withdrawal?'-'+fmt(a.withdrawal):'—'}</td>
+                    {include401k&&<td style={{padding:'6px 8px',color:carry401k>0?'#f59e0b':'#1e293b'}}>{carry401k>0?fmtK(carry401k):'—'}{a?.balance401k!=null&&a.balance401k!==''?'':carry401k>0?<span style={{fontSize:7,color:'#334155',marginLeft:2}}>↳</span>:''}</td>}
                     <td style={{padding:'6px 8px',color:'#475569',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a?.notes||''}</td>
                     <td style={{padding:'6px 8px'}}>{hasData&&<span style={{color:'#22c55e',fontSize:9}}>✓</span>}</td>
                   </tr>);
-                })}</tbody>
+                })})()}</tbody>
               </table>
             </div>
           </div>
@@ -2440,10 +2464,13 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
               <div style={{width:36,height:20,borderRadius:10,background:include401k?'#06b6d4':'#334155',position:'relative',transition:'background .2s'}}><div style={{width:16,height:16,borderRadius:'50%',background:'#fff',position:'absolute',top:2,left:include401k?18:2,transition:'left .2s'}}/></div>
               <span style={{fontSize:10,fontWeight:600,color:include401k?'#e2e8f0':'#64748b',fontFamily:'var(--m)'}}>Include 401k</span>
             </div>
-            <Inp label="Current Age" value={currentAge} onChange={setCurrentAge} step={1} small/>
-            <Inp label="Retirement Age" value={retirementAge} onChange={setRetirementAge} step={1} small/>
-            <Inp label="Current 401k" value={current401k} onChange={setCurrent401k} pre="$" step={1000} small/>
-            <Inp label="Monthly 401k" value={monthly401kContrib} onChange={setMonthly401kContrib} pre="$" step={50} small/>
+            <div style={{marginBottom:10}}>
+              <label style={{display:'block',fontSize:9,fontWeight:700,color:'#94a3b8',marginBottom:3,textTransform:'uppercase',letterSpacing:'.08em',fontFamily:'var(--m)'}}>401k Withdrawal Start Date</label>
+              <input type="date" value={retirement401kStartDate} onChange={e=>setRetirement401kStartDate(e.target.value)}
+                style={{background:'#020617',border:'1px solid #1e293b',borderRadius:6,padding:'7px 8px',color:'#e2e8f0',fontSize:12,fontFamily:'var(--m)',width:'100%',outline:'none'}} />
+              <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>When you plan to start withdrawing from 401k</div>
+            </div>
+            <Inp label="Monthly 401k Contrib" value={monthly401kContrib} onChange={setMonthly401kContrib} pre="$" step={50} small/>
             <Inp label="401k Yield" value={annual401kYield} onChange={setAnnual401kYield} suf="%" step={0.5} small/>
             <Inp label="Index Return" value={indexFundReturn} onChange={setIndexFundReturn} suf="%" step={0.5} small/>
           </div>
@@ -2480,7 +2507,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             {showImport&&<div style={{marginBottom:14}}>
               <textarea value={importData} onChange={e=>setImportData(e.target.value)} placeholder="Paste exported JSON..." style={{width:'100%',height:100,background:'#020617',border:'1px solid #1e293b',borderRadius:6,color:'#e2e8f0',fontSize:9,fontFamily:'var(--m)',padding:8,resize:'vertical',outline:'none'}}/>
               <div style={{marginTop:6}}><Btn onClick={()=>{try{const data=JSON.parse(importData);
-                if(data.settings){const s=data.settings;if(s.startDate)setStartDate(s.startDate);if(s.monthlyPersonalCash!=null)setMonthlyPersonalCash(s.monthlyPersonalCash);if(s.startingFlipAmount!=null)setStartingFlipAmount(s.startingFlipAmount);if(s.desiredMonthlyWithdrawal!=null)setDesiredMonthlyWithdrawal(s.desiredMonthlyWithdrawal);if(s.maxFlipSize!=null)setMaxFlipSize(s.maxFlipSize);if(s.defaultYield!=null)setDefaultYield(s.defaultYield);if(s.locInterestRate!=null)setLocInterestRate(s.locInterestRate);if(s.flipDurationYears!=null)setFlipDurationYears(s.flipDurationYears);if(s.flipsPerAmount!=null)setFlipsPerAmount(s.flipsPerAmount);if(s.growthMultiplier!=null)setGrowthMultiplier(s.growthMultiplier);if(s.staleThreshold!=null)setStaleThreshold(s.staleThreshold);if(s.currentAge!=null)setCurrentAge(s.currentAge);if(s.retirementAge!=null)setRetirementAge(s.retirementAge);if(s.current401k!=null)setCurrent401k(s.current401k);if(s.include401k!=null)setInclude401k(s.include401k);if(s.monthly401kContrib!=null)setMonthly401kContrib(s.monthly401kContrib);if(s.annual401kYield!=null)setAnnual401kYield(s.annual401kYield);if(s.indexFundReturn!=null)setIndexFundReturn(s.indexFundReturn);saveSettings(s);}
+                if(data.settings){const s=data.settings;if(s.startDate)setStartDate(s.startDate);if(s.monthlyPersonalCash!=null)setMonthlyPersonalCash(s.monthlyPersonalCash);if(s.startingFlipAmount!=null)setStartingFlipAmount(s.startingFlipAmount);if(s.desiredMonthlyWithdrawal!=null)setDesiredMonthlyWithdrawal(s.desiredMonthlyWithdrawal);if(s.maxFlipSize!=null)setMaxFlipSize(s.maxFlipSize);if(s.defaultYield!=null)setDefaultYield(s.defaultYield);if(s.locInterestRate!=null)setLocInterestRate(s.locInterestRate);if(s.flipDurationYears!=null)setFlipDurationYears(s.flipDurationYears);if(s.flipsPerAmount!=null)setFlipsPerAmount(s.flipsPerAmount);if(s.growthMultiplier!=null)setGrowthMultiplier(s.growthMultiplier);if(s.staleThreshold!=null)setStaleThreshold(s.staleThreshold);if(s.currentAge!=null)setCurrentAge(s.currentAge);if(s.retirementAge!=null)setRetirementAge(s.retirementAge);if(s.current401k!=null)setCurrent401k(s.current401k);if(s.include401k!=null)setInclude401k(s.include401k);if(s.monthly401kContrib!=null)setMonthly401kContrib(s.monthly401kContrib);if(s.annual401kYield!=null)setAnnual401kYield(s.annual401kYield);if(s.indexFundReturn!=null)setIndexFundReturn(s.indexFundReturn);if(s.retirement401kStartDate)setRetirement401kStartDate(s.retirement401kStartDate);saveSettings(s);}
                 if(data.actuals){setActuals(data.actuals);saveActuals(data.actuals);}
                 if(data.flips){setTrackedFlips(data.flips);saveFlips(data.flips);}
                 if(data.ibcPolicies){setIbcPolicies(data.ibcPolicies);saveIBCPolicies(data.ibcPolicies);}
