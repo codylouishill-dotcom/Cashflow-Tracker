@@ -211,11 +211,11 @@ async function sheetLoadFlips() {
 async function sheetSaveActuals(actuals) {
   const header = ['month','personalCash','withdrawal','notes','balance401k'];
   const rows = [header, ...Object.entries(actuals).sort().map(([mk, a]) => [mk, a.personalCash??'', a.withdrawal??'', a.notes??'', a.balance401k??''])];
-  await sheetClearAndWrite(TABS.ACTUALS, 'A:D', rows);
+  await sheetClearAndWrite(TABS.ACTUALS, 'A:E', rows);
 }
 async function sheetLoadActuals() {
   try {
-    const rows = await sheetRead(TABS.ACTUALS, 'A:D');
+    const rows = await sheetRead(TABS.ACTUALS, 'A:E');
     if (rows.length < 2) return {};
     const a = {};
     for (const row of rows.slice(1)) {
