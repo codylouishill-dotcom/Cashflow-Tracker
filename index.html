@@ -2286,10 +2286,10 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                 let dest = 'Unassigned';
                 let isDibsGrouped = false;
                 const isSingleSplit = (f.splits||[]).length <= 1;
-                const spIsDibs = sp.isDibs || (isSingleSplit && f.dibs);
-                const spDibsDest = sp.dibsDestPolicyId || (isSingleSplit && f.dibs && f.dibs.destPolicyId);
+                const spIsDibs = sp.isDibs || (isSingleSplit && !!f.dibs);
+                const spDibsDest = sp.dibsDestPolicyId || (isSingleSplit && f.dibs ? f.dibs.destPolicyId : null);
                 if (spIsDibs && spDibsDest) {
-                  const destPolicy = ibcPolicies.find(p => p.id === spDibsDest);
+                  const destPolicy = ibcPolicies.find(p => String(p.id) === String(spDibsDest));
                   dest = destPolicy ? destPolicy.name : 'IBC Policy';
                   isDibsGrouped = true;
                 } else if (sp.destination) {
