@@ -209,8 +209,8 @@ async function sheetLoadFlips() {
 
 // Actuals
 async function sheetSaveActuals(actuals) {
-  const header = ['month','personalCash','withdrawal','notes'];
-  const rows = [header, ...Object.entries(actuals).sort().map(([mk, a]) => [mk, a.personalCash??'', a.withdrawal??'', a.notes??''])];
+  const header = ['month','personalCash','withdrawal','notes','balance401k'];
+  const rows = [header, ...Object.entries(actuals).sort().map(([mk, a]) => [mk, a.personalCash??'', a.withdrawal??'', a.notes??'', a.balance401k??''])];
   await sheetClearAndWrite(TABS.ACTUALS, 'A:D', rows);
 }
 async function sheetLoadActuals() {
@@ -220,7 +220,7 @@ async function sheetLoadActuals() {
     const a = {};
     for (const row of rows.slice(1)) {
       if (!row[0]) continue;
-      a[row[0]] = { personalCash: row[1]!==''?parseFloat(row[1]):null, withdrawal: row[2]!==''?parseFloat(row[2]):0, notes: row[3]||'' };
+      a[row[0]] = { personalCash: row[1]!==''?parseFloat(row[1]):null, withdrawal: row[2]!==''?parseFloat(row[2]):0, notes: row[3]||'', balance401k: row[4]!==undefined&&row[4]!==''?parseFloat(row[4]):null };
     }
     return a;
   } catch { return {}; }
