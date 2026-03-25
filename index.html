@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1762,14 +1763,24 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
     }
     return 0;
   }, [combinedRows]);
-  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:'', startDate:'', isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'', splits:[{ id: uid(), name:'Main', amount:'', yield:12, durationYears:5, indexFund:false }] });
+  const [newFlipForm, setNewFlipForm] = useState({ name:'', amount:'', startDate:'', isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'', splits:[{ id: uid(), name:'Main', amount:'', yield:12, durationYears:5, indexFund:false, destination:'' }] });
   const [editingFlipId, setEditingFlipId] = useState(null);
+
+  // Build destination suggestions from IBC policies, LOCs, and existing split destinations
+  const destSuggestions = useMemo(() => {
+    const dests = new Set();
+    ibcPolicies.forEach(p => { if (p.name) dests.add(p.name); });
+    ibcLocs.forEach(l => { if (l.name) dests.add(l.name); });
+    trackedFlips.forEach(f => { (f.splits||[]).forEach(sp => { if (sp.destination) dests.add(sp.destination); }); });
+    return [...dests].sort();
+  }, [ibcPolicies, ibcLocs, trackedFlips]);
   const [exportData, setExportData] = useState(null);
   const [importData, setImportData] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [detailRange, setDetailRange] = useState('default');
   const [showGapDealModal, setShowGapDealModal] = useState(false);
   const [showCompletedFlips, setShowCompletedFlips] = useState(false);
+  const [flipsView, setFlipsView] = useState('byFlip'); // 'byFlip' | 'byDest'
 
   // Load from storage
   useEffect(() => {
@@ -1982,7 +1993,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       splits: formSplits,
     };
     persistFlips([...trackedFlips, f]);
-    setNewFlipForm({ name:'', amount:'', startDate:'', isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'', splits:[{ id: uid(), name:'Main', amount:'', yield:12, durationYears:5, indexFund:false, isDibs:false }] });
+    setNewFlipForm({ name:'', amount:'', startDate:'', isDibs:false, dibsSourceType:'loc', dibsSourceId:'', dibsDestPolicyId:'', splits:[{ id: uid(), name:'Main', amount:'', yield:12, durationYears:5, indexFund:false, isDibs:false, destination:'' }] });
   };
   const removeFlip = (id) => persistFlips(trackedFlips.filter(f=>f.id!==id));
   const updateFlip = (id, field, value) => { const next = trackedFlips.map(f => { if(f.id!==id)return f; const u={...f,[field]:value}; if(['amount','yield','durationYears'].includes(field))u.monthlyPmt=monthlyPmt(u.amount,(u.yield||8)/100,u.durationYears); return u; }); persistFlips(next); };
@@ -2198,6 +2209,12 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                   <Inp label="Amount" value={sp.amount} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],amount:v};setNewFlipForm({...newFlipForm,splits:ns});}} pre="$" step={500} small note={nextFlipSize>0&&si===0?`next: ${fmtK(nextFlipSize)}`:''} style={{flex:'1 1 100px'}}/>
                   <Inp label="Yield" value={sp.yield} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],yield:v};setNewFlipForm({...newFlipForm,splits:ns});}} suf="%" step={0.5} small style={{flex:'0 0 70px'}}/>
                   <Inp label="Duration" value={sp.durationYears} onChange={v=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],durationYears:v};setNewFlipForm({...newFlipForm,splits:ns});}} suf="yrs" step={0.5} small style={{flex:'0 0 80px'}}/>
+                  <div style={{flex:'1 1 140px',marginBottom:8}}>
+                    <label style={{display:'block',fontSize:9,fontWeight:700,color:'#94a3b8',marginBottom:3,textTransform:'uppercase',letterSpacing:'.08em',fontFamily:'var(--m)'}}>Destination</label>
+                    <input list="dest-suggestions" value={sp.destination||''} onChange={e=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],destination:e.target.value};setNewFlipForm({...newFlipForm,splits:ns});}} placeholder="e.g. S&P 500 Index Fund"
+                      style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:6,padding:'7px 8px',color:'#e2e8f0',fontSize:11,fontFamily:'var(--m)',width:'100%',outline:'none'}} />
+                    <datalist id="dest-suggestions">{destSuggestions.map(d=><option key={d} value={d}/>)}</datalist>
+                  </div>
                   <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,paddingBottom:2}}>
                     <div style={{display:'flex',alignItems:'center',gap:4,cursor:'pointer'}} onClick={()=>{const ns=[...newFlipForm.splits];ns[si]={...ns[si],indexFund:!ns[si].indexFund};setNewFlipForm({...newFlipForm,splits:ns});}}>
                       <div style={{width:14,height:14,borderRadius:3,border:'1px solid '+(sp.indexFund?'#f97316':'#334155'),background:sp.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{sp.indexFund&&<span style={{color:'#fff',fontSize:9}}>✓</span>}</div>
@@ -2240,13 +2257,76 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
 
             {/* Actions */}
             <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
-              <Btn onClick={()=>setNewFlipForm({...newFlipForm,splits:[...newFlipForm.splits,{id:uid(),name:`Split ${newFlipForm.splits.length+1}`,amount:'',yield:12,durationYears:5,indexFund:false,isDibs:false}]})} color="#f59e0b" small>+ Add Split</Btn>
+              <Btn onClick={()=>setNewFlipForm({...newFlipForm,splits:[...newFlipForm.splits,{id:uid(),name:`Split ${newFlipForm.splits.length+1}`,amount:'',yield:12,durationYears:5,indexFund:false,isDibs:false,destination:''}]})} color="#f59e0b" small>+ Add Split</Btn>
               <Btn onClick={addFlip} color="#22c55e">+ Add Flip</Btn>
               {(()=>{const t=newFlipForm.splits.reduce((s,sp)=>s+(Number(sp.amount)||0),0);const pmt=newFlipForm.splits.reduce((s,sp)=>s+monthlyPmt(Number(sp.amount)||0,(Number(sp.yield)||12)/100,Number(sp.durationYears)||5),0);return t>0?<div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginLeft:4}}>Total: {fmt(t)} · Pmt: {fmt(pmt)}/mo</div>:null;})()}
             </div>
           </div>
 
-          {(()=>{
+          {/* View toggle */}
+          <div style={{display:'flex',gap:4,marginBottom:14}}>
+            {[['byFlip','By Flip'],['byDest','By Destination']].map(([k,l])=>(<button key={k} onClick={()=>setFlipsView(k)} style={{
+              padding:'6px 14px',borderRadius:6,border:'1px solid '+(flipsView===k?'#164e63':'transparent'),
+              background:flipsView===k?'#0c1929':'transparent',color:flipsView===k?'#06b6d4':'#64748b',
+              fontSize:10,fontWeight:600,cursor:'pointer',fontFamily:'var(--m)',transition:'all .15s',
+            }}>{l}</button>))}
+          </div>
+
+          {/* By Destination view */}
+          {flipsView==='byDest'&&(()=>{
+            const groups = {};
+            trackedFlips.forEach(f => {
+              const fStart = parseDate(f.startDate);
+              const fEnd = addMo(fStart, Math.round(flipMaxDuration(f) * 12));
+              const isActive = fEnd > today;
+              (f.splits||[{...f, id: f.id+'_main'}]).forEach(sp => {
+                const dest = sp.destination || 'Unassigned';
+                if (!groups[dest]) groups[dest] = { splits: [], totalAmt: 0, totalPmt: 0, activeCount: 0, completedCount: 0 };
+                const spPmt = sp.monthlyPmt || monthlyPmt(sp.amount||0, (sp.yield||8)/100, sp.durationYears||3);
+                groups[dest].splits.push({ ...sp, flipName: f.name, flipId: f.id, flipStart: f.startDate, flipEnd: fEnd, isActive, pmt: spPmt });
+                groups[dest].totalAmt += Number(sp.amount||0);
+                groups[dest].totalPmt += isActive ? spPmt : 0;
+                if (isActive) groups[dest].activeCount++; else groups[dest].completedCount++;
+              });
+            });
+            const sortedDests = Object.entries(groups).sort((a,b) => b[1].totalPmt - a[1].totalPmt);
+            return <div>
+              {sortedDests.map(([dest, g]) => (
+                <div key={dest} style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:16,marginBottom:12}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:700,color:dest==='Unassigned'?'#475569':'#06b6d4'}}>{dest}</div>
+                      <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>{g.activeCount} active{g.completedCount>0?` · ${g.completedCount} completed`:''} · {fmt(g.totalAmt)} deployed</div>
+                    </div>
+                    <div style={{textAlign:'right'}}>
+                      <div style={{fontSize:18,fontWeight:800,color:'#22c55e',fontFamily:'var(--m)'}}>{fmt(g.totalPmt)}<span style={{fontSize:9,color:'#475569',fontWeight:400}}>/mo</span></div>
+                      <div style={{fontSize:8,color:'#475569',fontFamily:'var(--m)'}}>active cashflow</div>
+                    </div>
+                  </div>
+                  <div className="ibc-tw"><table className="ibc-table"><thead><tr>
+                    <th>Flip</th><th>Split</th><th>Amount</th><th>Yield</th><th>Monthly</th><th>End Date</th><th>Status</th>
+                  </tr></thead><tbody>
+                    {g.splits.map((sp, i) => {
+                      const endStr = sp.flipEnd ? `${MO[sp.flipEnd.getMonth()]} ${sp.flipEnd.getFullYear()}` : '—';
+                      return <tr key={i} style={{opacity:sp.isActive?1:0.5}}>
+                        <td>{sp.flipName}</td>
+                        <td style={{color:'#475569'}}>{sp.name||'Main'}</td>
+                        <td>{fmt(sp.amount||0)}</td>
+                        <td>{sp.yield||8}%</td>
+                        <td style={{color:'var(--green)',fontWeight:600}}>{fmt(sp.pmt)}</td>
+                        <td style={{color:'#475569'}}>{endStr}</td>
+                        <td>{sp.isActive?<span className="badge badge-g">Active</span>:<span className="badge" style={{background:'rgba(71,85,105,.2)',color:'#475569'}}>Done</span>}</td>
+                      </tr>;
+                    })}
+                  </tbody></table></div>
+                </div>
+              ))}
+              {sortedDests.length===0&&<div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:30,textAlign:'center'}}><div style={{fontSize:11,color:'#475569',fontFamily:'var(--m)'}}>No flips tracked yet.</div></div>}
+            </div>;
+          })()}
+
+          {/* By Flip view */}
+          {flipsView==='byFlip'&&(()=>{
             const activeFlips = trackedFlips.filter(f => {
               const fEnd = addMo(parseDate(f.startDate), Math.round(flipMaxDuration(f) * 12));
               return fEnd > today;
@@ -2337,6 +2417,11 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                   <Inp label="Amount" value={sp.amount} onChange={v=>updateSplit(f.id,sp.id,'amount',v)} pre="$" small style={{flex:'1 1 80px'}}/>
                   <Inp label="Yield" value={sp.yield} onChange={v=>updateSplit(f.id,sp.id,'yield',v)} suf="%" small style={{flex:'0 0 60px'}}/>
                   <Inp label="Duration" value={sp.durationYears} onChange={v=>updateSplit(f.id,sp.id,'durationYears',v)} suf="yr" small style={{flex:'0 0 60px'}}/>
+                  <div style={{flex:'1 1 120px',marginBottom:8}}>
+                    <label style={{display:'block',fontSize:9,fontWeight:700,color:'#94a3b8',marginBottom:3,textTransform:'uppercase',letterSpacing:'.08em',fontFamily:'var(--m)'}}>Dest</label>
+                    <input list="dest-suggestions" value={sp.destination||''} onChange={e=>updateSplit(f.id,sp.id,'destination',e.target.value)} placeholder="Destination"
+                      style={{background:'#020617',border:'1px solid #1e293b',borderRadius:4,padding:'5px 6px',color:'#e2e8f0',fontSize:10,fontFamily:'var(--m)',width:'100%',outline:'none'}} />
+                  </div>
                   <div style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',marginBottom:8,paddingBottom:2}} onClick={()=>updateSplit(f.id,sp.id,'indexFund',!sp.indexFund)}>
                     <div style={{width:14,height:14,borderRadius:3,border:'1px solid '+(sp.indexFund?'#f97316':'#334155'),background:sp.indexFund?'#f97316':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{sp.indexFund&&<span style={{color:'#fff',fontSize:9}}>✓</span>}</div>
                     <span style={{fontSize:8,color:sp.indexFund?'#f97316':'#64748b',fontFamily:'var(--m)',fontWeight:600}}>IDX</span>
@@ -2573,5 +2658,6 @@ function AppWithAuth() {
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(AppWithAuth));
 
 </script>
+
 </body>
 </html>
