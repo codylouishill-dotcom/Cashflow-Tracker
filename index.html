@@ -2280,13 +2280,12 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
               const fEnd = addMo(fStart, Math.round(flipMaxDuration(f) * 12));
               const isActive = fEnd > today;
               (f.splits||[{...f, id: f.id+'_main'}]).forEach(sp => {
-                // DIBS splits: group by destination IBC policy name
+                // DIBS splits: group by destination IBC policy name (split-level only)
                 // Non-DIBS splits: group by destination free-text field
                 let dest = 'Unassigned';
                 let isDibsGrouped = false;
-                const dibsDestId = sp.dibsDestPolicyId || (f.dibs && f.dibs.destPolicyId);
-                if ((sp.isDibs || f.dibs) && dibsDestId) {
-                  const destPolicy = ibcPolicies.find(p => p.id === dibsDestId);
+                if (sp.isDibs && sp.dibsDestPolicyId) {
+                  const destPolicy = ibcPolicies.find(p => p.id === sp.dibsDestPolicyId);
                   dest = destPolicy ? destPolicy.name : 'IBC Policy';
                   isDibsGrouped = true;
                 } else if (sp.destination) {
