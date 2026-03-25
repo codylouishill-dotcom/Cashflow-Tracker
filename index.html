@@ -438,7 +438,7 @@ function simulateFromState(p, initialState) {
         } else { assetCF += f.pmt; }
       }
     }
-    if (include401k && m < monthsToRetirement) { s.b401k += monthly401kContrib; s.b401k *= (1 + annual401kYield / 12); }
+    if (include401k && m < monthsToRetirement) { if (!postFreedom) s.b401k += monthly401kContrib; s.b401k *= (1 + annual401kYield / 12); }
     const ret401k = (include401k && m >= monthsToRetirement) ? (s.b401k * 0.04) / 12 : 0;
     const locInt = s.loc * (locInterestRate / 12);
     s.loc = s.loc + locInt - pc - assetCF - ret401k + wd;
