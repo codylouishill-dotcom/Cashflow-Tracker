@@ -2282,10 +2282,14 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
               (f.splits||[{...f, id: f.id+'_main'}]).forEach(sp => {
                 // DIBS splits: group by destination IBC policy name (split-level only)
                 // Non-DIBS splits: group by destination free-text field
+                // For unsplit flips (single split), fall back to flip-level DIBS if set
                 let dest = 'Unassigned';
                 let isDibsGrouped = false;
-                if (sp.isDibs && sp.dibsDestPolicyId) {
-                  const destPolicy = ibcPolicies.find(p => p.id === sp.dibsDestPolicyId);
+                const isSingleSplit = (f.splits||[]).length <= 1;
+                const spIsDibs = sp.isDibs || (isSingleSplit && f.dibs);
+                const spDibsDest = sp.dibsDestPolicyId || (isSingleSplit && f.dibs && f.dibs.destPolicyId);
+                if (spIsDibs && spDibsDest) {
+                  const destPolicy = ibcPolicies.find(p => p.id === spDibsDest);
                   dest = destPolicy ? destPolicy.name : 'IBC Policy';
                   isDibsGrouped = true;
                 } else if (sp.destination) {
