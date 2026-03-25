@@ -2280,10 +2280,22 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
               const fEnd = addMo(fStart, Math.round(flipMaxDuration(f) * 12));
               const isActive = fEnd > today;
               (f.splits||[{...f, id: f.id+'_main'}]).forEach(sp => {
-                const dest = sp.destination || 'Unassigned';
-                if (!groups[dest]) groups[dest] = { splits: [], totalAmt: 0, totalPmt: 0, activeCount: 0, completedCount: 0 };
+                // DIBS splits: group by destination IBC policy name
+                // Non-DIBS splits: group by destination free-text field
+                let dest = 'Unassigned';
+                let isDibsGrouped = false;
+                const dibsDestId = sp.dibsDestPolicyId || (f.dibs && f.dibs.destPolicyId);
+                if ((sp.isDibs || f.dibs) && dibsDestId) {
+                  const destPolicy = ibcPolicies.find(p => p.id === dibsDestId);
+                  dest = destPolicy ? destPolicy.name : 'IBC Policy';
+                  isDibsGrouped = true;
+                } else if (sp.destination) {
+                  dest = sp.destination;
+                }
+                if (!groups[dest]) groups[dest] = { splits: [], totalAmt: 0, totalPmt: 0, activeCount: 0, completedCount: 0, isDibs: false };
+                if (isDibsGrouped) groups[dest].isDibs = true;
                 const spPmt = sp.monthlyPmt || monthlyPmt(sp.amount||0, (sp.yield||8)/100, sp.durationYears||3);
-                groups[dest].splits.push({ ...sp, flipName: f.name, flipId: f.id, flipStart: f.startDate, flipEnd: fEnd, isActive, pmt: spPmt });
+                groups[dest].splits.push({ ...sp, flipName: f.name, flipId: f.id, flipStart: f.startDate, flipEnd: fEnd, isActive, pmt: spPmt, isDibsSplit: isDibsGrouped });
                 groups[dest].totalAmt += Number(sp.amount||0);
                 groups[dest].totalPmt += isActive ? spPmt : 0;
                 if (isActive) groups[dest].activeCount++; else groups[dest].completedCount++;
@@ -2295,7 +2307,10 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                 <div key={dest} style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,padding:16,marginBottom:12}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
                     <div>
-                      <div style={{fontSize:14,fontWeight:700,color:dest==='Unassigned'?'#475569':'#06b6d4'}}>{dest}</div>
+                      <div style={{display:'flex',alignItems:'center',gap:8}}>
+                        <div style={{fontSize:14,fontWeight:700,color:dest==='Unassigned'?'#475569':'#06b6d4'}}>{dest}</div>
+                        {g.isDibs&&<span className="badge badge-b" style={{fontSize:8}}>DIBS</span>}
+                      </div>
                       <div style={{fontSize:9,color:'#475569',fontFamily:'var(--m)',marginTop:2}}>{g.activeCount} active{g.completedCount>0?` · ${g.completedCount} completed`:''} · {fmt(g.totalAmt)} deployed</div>
                     </div>
                     <div style={{textAlign:'right'}}>
@@ -2304,7 +2319,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                     </div>
                   </div>
                   <div className="ibc-tw"><table className="ibc-table"><thead><tr>
-                    <th>Flip</th><th>Split</th><th>Amount</th><th>Yield</th><th>Monthly</th><th>End Date</th><th>Status</th>
+                    <th>Flip</th><th>Split</th><th>Amount</th><th>Yield</th><th>Monthly</th><th>End Date</th><th></th><th>Status</th>
                   </tr></thead><tbody>
                     {g.splits.map((sp, i) => {
                       const endStr = sp.flipEnd ? `${MO[sp.flipEnd.getMonth()]} ${sp.flipEnd.getFullYear()}` : '—';
@@ -2315,6 +2330,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                         <td>{sp.yield||8}%</td>
                         <td style={{color:'var(--green)',fontWeight:600}}>{fmt(sp.pmt)}</td>
                         <td style={{color:'#475569'}}>{endStr}</td>
+                        <td>{sp.isDibsSplit&&<span className="badge badge-b" style={{fontSize:7}}>DIBS</span>}{sp.indexFund&&<span style={{fontSize:7,padding:'1px 4px',borderRadius:3,background:'rgba(249,115,22,.15)',color:'#f97316',fontWeight:700,fontFamily:'var(--m)',marginLeft:2}}>IDX</span>}</td>
                         <td>{sp.isActive?<span className="badge badge-g">Active</span>:<span className="badge" style={{background:'rgba(71,85,105,.2)',color:'#475569'}}>Done</span>}</td>
                       </tr>;
                     })}
