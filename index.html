@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -209,18 +208,18 @@ async function sheetLoadFlips() {
 
 // Actuals
 async function sheetSaveActuals(actuals) {
-  const header = ['month','personalCash','withdrawal','notes','balance401k'];
-  const rows = [header, ...Object.entries(actuals).sort().map(([mk, a]) => [mk, a.personalCash??'', a.withdrawal??'', a.notes??'', a.balance401k??''])];
-  await sheetClearAndWrite(TABS.ACTUALS, 'A:E', rows);
+  const header = ['month','personalCash','withdrawal','notes','balance401k','coversMonths'];
+  const rows = [header, ...Object.entries(actuals).sort().map(([mk, a]) => [mk, a.personalCash??'', a.withdrawal??'', a.notes??'', a.balance401k??'', a.coversMonths??1])];
+  await sheetClearAndWrite(TABS.ACTUALS, 'A:F', rows);
 }
 async function sheetLoadActuals() {
   try {
-    const rows = await sheetRead(TABS.ACTUALS, 'A:E');
+    const rows = await sheetRead(TABS.ACTUALS, 'A:F');
     if (rows.length < 2) return {};
     const a = {};
     for (const row of rows.slice(1)) {
       if (!row[0]) continue;
-      a[row[0]] = { personalCash: row[1]!==''?parseFloat(row[1]):null, withdrawal: row[2]!==''?parseFloat(row[2]):0, notes: row[3]||'', balance401k: row[4]!==undefined&&row[4]!==''?parseFloat(row[4]):null };
+      a[row[0]] = { personalCash: row[1]!==''?parseFloat(row[1]):null, withdrawal: row[2]!==''?parseFloat(row[2]):0, notes: row[3]||'', balance401k: row[4]!==undefined&&row[4]!==''?parseFloat(row[4]):null, coversMonths: row[5]!==undefined&&row[5]!==''?(parseInt(row[5])||1):1 };
     }
     return a;
   } catch { return {}; }
@@ -289,6 +288,72 @@ const parseDate = s => { const [y,m,d] = s.split('-').map(Number); return new Da
 const addMo = (d, m) => new Date(d.getFullYear(), d.getMonth() + m, 1);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 const daysBetween = (a,b) => Math.round((b-a)/(1000*60*60*24));
+
+// ═══════════════════════════════════════════════
+// COVERSMONTHS UTILITIES — pre-funded contributions
+// An actual with coversMonths > 1 amortizes its personalCash across that
+// window of months. Used for scenarios like "$6k deposited in Jan covers
+// Jan/Feb/Mar at $2k/mo effective" — keeps the Freedom Date stable instead
+// of spiking then cratering the forecast baseline.
+// ═══════════════════════════════════════════════
+
+// Parse a YYYY-MM key into an absolute month index (year*12 + month0)
+const mkToIdx = mk => { const [y, m] = mk.split('-').map(Number); return y * 12 + (m - 1); };
+
+// Convert an absolute month index back to a YYYY-MM key
+const idxToMk = idx => { const y = Math.floor(idx / 12); const m = (idx % 12) + 1; return y + '-' + String(m).padStart(2, '0'); };
+
+// Resolves the effective personalCash contribution for a given month key,
+// amortizing multi-month actuals across their coverage window.
+// Returns null if no actual covers this month (caller decides default).
+function resolveEffectivePersonalCash(mk, actuals) {
+  const targetIdx = mkToIdx(mk);
+  let total = 0;
+  let anyCovering = false;
+  for (const [amk, a] of Object.entries(actuals)) {
+    if (a.personalCash == null) continue;
+    const covers = Math.max(1, Number(a.coversMonths) || 1);
+    const startIdx = mkToIdx(amk);
+    const endIdx = startIdx + covers - 1;
+    if (targetIdx >= startIdx && targetIdx <= endIdx) {
+      total += (Number(a.personalCash) / covers);
+      anyCovering = true;
+    }
+  }
+  return anyCovering ? total : null;
+}
+
+// Builds the sorted, deduped list of month keys that the actuals loop should
+// iterate over. Includes every explicit actual's own month PLUS any months
+// covered by a multi-month entry. This way the LOC balance evolves correctly
+// through the coverage window even when the user only logs one row.
+function buildCoveredMonthKeys(actuals) {
+  const idxSet = new Set();
+  for (const [amk, a] of Object.entries(actuals)) {
+    const startIdx = mkToIdx(amk);
+    const covers = Math.max(1, Number(a.coversMonths) || 1);
+    for (let i = 0; i < covers; i++) idxSet.add(startIdx + i);
+  }
+  return [...idxSet].sort((a, b) => a - b).map(idxToMk);
+}
+
+// Is a given month key an explicit actual, or just covered by another entry?
+const isExplicitActual = (mk, actuals) => Object.prototype.hasOwnProperty.call(actuals, mk);
+
+// Which explicit actual (if any) is covering this month via its coverage window?
+// Returns the source month key, or null if this month is itself explicit or uncovered.
+function findCoveringActualMk(mk, actuals) {
+  if (isExplicitActual(mk, actuals)) return null;
+  const targetIdx = mkToIdx(mk);
+  for (const [amk, a] of Object.entries(actuals)) {
+    const covers = Math.max(1, Number(a.coversMonths) || 1);
+    if (covers <= 1) continue;
+    const startIdx = mkToIdx(amk);
+    const endIdx = startIdx + covers - 1;
+    if (targetIdx > startIdx && targetIdx <= endIdx) return amk;
+  }
+  return null;
+}
 
 function monthlyPmt(principal, annualRate, years) {
   const r = annualRate/12, n = years*12;
@@ -1870,7 +1935,10 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const { combinedRows, freedomDate, freedomMonth, cfDepletedDate } = useMemo(() => {
     const sd = parseDate(startDate);
     const dy = defaultYield / 100, lr = locInterestRate / 100, ay = annual401kYield / 100;
-    const actualMonthKeys = Object.keys(actuals).sort();
+    // Include both explicit actuals AND months covered by multi-month entries.
+    // A $6k/3-month entry in Jan will expand to Jan/Feb/Mar here so the LOC
+    // balance evolves correctly through the whole coverage window.
+    const actualMonthKeys = buildCoveredMonthKeys(actuals);
     const actualRows = [];
     let runningLOC = 0;
     let latest401kBal = current401k || 0; // carry-forward 401k from actuals
@@ -1880,10 +1948,11 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       const date = new Date(yr, mo - 1, 1);
       const monthIdx = (yr - sd.getFullYear()) * 12 + (mo - 1 - sd.getMonth());
       if (monthIdx < 0) continue;
-      const a = actuals[mk];
-      // Update carry-forward 401k balance if entered
+      const a = actuals[mk] || {}; // may be virtual (covered by earlier entry)
+      // Update carry-forward 401k balance if entered (only from explicit entries)
       if (a.balance401k != null && a.balance401k !== '') latest401kBal = Number(a.balance401k);
-      const personalCash = a.personalCash ?? 0;
+      // Amortized effective contribution — handles both single-month and multi-month entries
+      const personalCash = resolveEffectivePersonalCash(mk, actuals) ?? 0;
       const withdrawal = a.withdrawal || 0;
       let assetCF = 0;
       for (const f of trackedFlips) {
@@ -1963,8 +2032,17 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const sd = parseDate(startDate);
   const today = new Date();
   const currentMoKey = moKey(today);
+  // Extend through today PLUS any future months covered by multi-month actual entries
+  let furthestCoveredIdx = today.getFullYear() * 12 + today.getMonth();
+  for (const [amk, a] of Object.entries(actuals)) {
+    const covers = Math.max(1, Number(a?.coversMonths) || 1);
+    if (covers <= 1) continue;
+    const endIdx = mkToIdx(amk) + covers - 1;
+    if (endIdx > furthestCoveredIdx) furthestCoveredIdx = endIdx;
+  }
   const allMonthKeys = [];
-  for (let d = new Date(sd); d <= today; d = addMo(d, 1)) allMonthKeys.push(moKey(d));
+  const sdIdx = sd.getFullYear() * 12 + sd.getMonth();
+  for (let i = sdIdx; i <= furthestCoveredIdx; i++) allMonthKeys.push(idxToMk(i));
 
   const updateActualFn = (mk, field, value) => { const next = { ...actuals, [mk]: { ...(actuals[mk]||{}), [field]: value } }; persistActuals(next); };
   const updateFlipCF = (flipId, splitId, mk, value) => {
@@ -2145,10 +2223,23 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
             <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
               <Inp label="Month" value={editMonth||currentMoKey} onChange={setEditMonth} type="text" note="YYYY-MM" small style={{flex:'0 0 120px'}}/>
               <Inp label="Personal Cash" value={actuals[editMonth||currentMoKey]?.personalCash??monthlyPersonalCash} onChange={v=>updateActualFn(editMonth||currentMoKey,'personalCash',v)} pre="$" step={100} small style={{flex:'1 1 120px'}}/>
+              <Inp label="Covers" value={actuals[editMonth||currentMoKey]?.coversMonths??1} onChange={v=>updateActualFn(editMonth||currentMoKey,'coversMonths',Math.max(1,Math.round(v||1)))} suf="mo" step={1} min={1} small note="months pre-funded" style={{flex:'0 0 110px'}}/>
               <Inp label="Withdrawal" value={actuals[editMonth||currentMoKey]?.withdrawal??0} onChange={v=>updateActualFn(editMonth||currentMoKey,'withdrawal',v)} pre="$" step={100} small style={{flex:'1 1 120px'}}/>
               {include401k&&<Inp label="401k Balance" value={actuals[editMonth||currentMoKey]?.balance401k??''} onChange={v=>updateActualFn(editMonth||currentMoKey,'balance401k',v)} pre="$" step={1000} small note="Leave blank to carry forward" style={{flex:'1 1 140px'}}/>}
               <Inp label="Notes" value={actuals[editMonth||currentMoKey]?.notes??''} onChange={v=>updateActualFn(editMonth||currentMoKey,'notes',v)} type="text" small style={{flex:'2 1 200px'}}/>
             </div>
+            {(()=>{
+              const mk = editMonth||currentMoKey;
+              const cur = actuals[mk];
+              const cov = Math.max(1, Number(cur?.coversMonths) || 1);
+              if (cov <= 1 || !cur?.personalCash) return null;
+              const perMo = cur.personalCash / cov;
+              const startIdx = mkToIdx(mk);
+              const endMk = idxToMk(startIdx + cov - 1);
+              return <div style={{marginTop:10,padding:'8px 12px',background:'rgba(6,182,212,.06)',border:'1px solid rgba(6,182,212,.25)',borderRadius:6,fontSize:10,fontFamily:'var(--m)',color:'#94a3b8'}}>
+                <span style={{color:'var(--cyan)'}}>◆ Pre-funded contribution.</span> {fmt(cur.personalCash)} amortizes to <span style={{color:'var(--cyan)',fontWeight:600}}>{fmt(perMo)}/mo</span> across {mk} → {endMk}. Future forecast unaffected.
+              </div>;
+            })()}
           </div>
           <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:10,overflow:'hidden'}}>
             <div style={{padding:'12px 16px',borderBottom:'1px solid #1e293b',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
@@ -2165,18 +2256,41 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
                 </tr></thead>
                 <tbody>{(()=>{
                   let carry401k = current401k || 0;
-                  return allMonthKeys.map(mk=>{const a=actuals[mk];const hasData=a&&(a.personalCash!=null);let flipCF=0;for(const f of trackedFlips){for(const sp of flipSplits(f)){if(sp.actualCF?.[mk]!=null)flipCF+=sp.actualCF[mk];}}
-                  if (a?.balance401k != null && a.balance401k !== '') carry401k = Number(a.balance401k);
-                  return(<tr key={mk} className="tb" style={{borderBottom:'1px solid #0b1120',background:hasData?'rgba(6,182,212,.03)':'transparent',cursor:'pointer'}} onClick={()=>setEditMonth(mk)}>
-                    <td style={{padding:'6px 8px',color:editMonth===mk?'#06b6d4':'#94a3b8',fontWeight:editMonth===mk?700:400}}>{mk}</td>
-                    <td style={{padding:'6px 8px',color:hasData?'#f59e0b':'#1e293b'}}>{hasData?fmt(a.personalCash??0):'—'}</td>
-                    <td style={{padding:'6px 8px',color:flipCF>0?'#22d3ee':'#1e293b'}}>{flipCF>0?fmt(flipCF):'—'}</td>
-                    <td style={{padding:'6px 8px',color:a?.withdrawal?'#f87171':'#1e293b'}}>{a?.withdrawal?'-'+fmt(a.withdrawal):'—'}</td>
-                    {include401k&&<td style={{padding:'6px 8px',color:carry401k>0?'#f59e0b':'#1e293b'}}>{carry401k>0?fmtK(carry401k):'—'}{a?.balance401k!=null&&a.balance401k!==''?'':carry401k>0?<span style={{fontSize:7,color:'#334155',marginLeft:2}}>↳</span>:''}</td>}
-                    <td style={{padding:'6px 8px',color:'#475569',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a?.notes||''}</td>
-                    <td style={{padding:'6px 8px'}}>{hasData&&<span style={{color:'#22c55e',fontSize:9}}>✓</span>}</td>
-                  </tr>);
-                })})()}</tbody>
+                  return allMonthKeys.map(mk=>{
+                    const a=actuals[mk];
+                    const covers = Math.max(1, Number(a?.coversMonths) || 1);
+                    const isExplicit = a && a.personalCash != null;
+                    const coveredBy = !isExplicit ? findCoveringActualMk(mk, actuals) : null;
+                    const isCovered = !!coveredBy;
+                    const hasData = isExplicit || isCovered;
+                    const effPerMo = isExplicit ? (a.personalCash / covers) : (isCovered ? (actuals[coveredBy].personalCash / Math.max(1, Number(actuals[coveredBy].coversMonths)||1)) : 0);
+                    let flipCF=0;for(const f of trackedFlips){for(const sp of flipSplits(f)){if(sp.actualCF?.[mk]!=null)flipCF+=sp.actualCF[mk];}}
+                    if (a?.balance401k != null && a.balance401k !== '') carry401k = Number(a.balance401k);
+                    const rowBg = isCovered ? 'rgba(6,182,212,.015)' : (isExplicit ? 'rgba(6,182,212,.03)' : 'transparent');
+                    return(<tr key={mk} className="tb" style={{borderBottom:'1px solid #0b1120',background:rowBg,cursor:'pointer'}} onClick={()=>setEditMonth(mk)}>
+                      <td style={{padding:'6px 8px',color:editMonth===mk?'#06b6d4':'#94a3b8',fontWeight:editMonth===mk?700:400}}>
+                        {mk}
+                        {isCovered && <span style={{fontSize:8,color:'var(--cyan)',marginLeft:4,opacity:.7}}>↳ {coveredBy}</span>}
+                      </td>
+                      <td style={{padding:'6px 8px',color:hasData?'#f59e0b':'#1e293b'}}>
+                        {isExplicit
+                          ? <>
+                              {fmt(a.personalCash??0)}
+                              {covers > 1 && <span style={{fontSize:8,color:'var(--cyan)',marginLeft:4}}>× {covers}mo → {fmt(effPerMo)}/mo</span>}
+                            </>
+                          : isCovered
+                            ? <span style={{color:'var(--cyan)',opacity:.75}}>{fmt(effPerMo)}<span style={{fontSize:8,marginLeft:3,opacity:.6}}>/mo</span></span>
+                            : '—'
+                        }
+                      </td>
+                      <td style={{padding:'6px 8px',color:flipCF>0?'#22d3ee':'#1e293b'}}>{flipCF>0?fmt(flipCF):'—'}</td>
+                      <td style={{padding:'6px 8px',color:a?.withdrawal?'#f87171':'#1e293b'}}>{a?.withdrawal?'-'+fmt(a.withdrawal):'—'}</td>
+                      {include401k&&<td style={{padding:'6px 8px',color:carry401k>0?'#f59e0b':'#1e293b'}}>{carry401k>0?fmtK(carry401k):'—'}{a?.balance401k!=null&&a.balance401k!==''?'':carry401k>0?<span style={{fontSize:7,color:'#334155',marginLeft:2}}>↳</span>:''}</td>}
+                      <td style={{padding:'6px 8px',color:'#475569',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a?.notes||(isCovered?<span style={{color:'#334155',fontStyle:'italic'}}>pre-funded</span>:'')}</td>
+                      <td style={{padding:'6px 8px'}}>{isExplicit&&<span style={{color:'#22c55e',fontSize:9}}>✓</span>}{isCovered&&<span style={{color:'var(--cyan)',fontSize:9,opacity:.6}}>◆</span>}</td>
+                    </tr>);
+                  });
+                })()}</tbody>
               </table>
             </div>
           </div>
@@ -2677,6 +2791,5 @@ function AppWithAuth() {
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(AppWithAuth));
 
 </script>
-
 </body>
 </html>
