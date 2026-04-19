@@ -324,17 +324,46 @@ function resolveEffectivePersonalCash(mk, actuals) {
 }
 
 // Builds the sorted, deduped list of month keys that the actuals loop should
-// iterate over. Includes every explicit actual's own month PLUS any months
-// covered by a multi-month entry. This way the LOC balance evolves correctly
-// through the coverage window even when the user only logs one row.
-function buildCoveredMonthKeys(actuals) {
+// iterate over. Includes every explicit actual's own month PLUS any covered
+// months from multi-month entries — but ONLY up to (and including) the current
+// calendar month. Months covered beyond "today" are handled inside the forecast,
+// not the actuals loop, so that `forecastStartMonth` isn't perturbed by how
+// far a coverage window extends into the future.
+function buildCoveredMonthKeys(actuals, nowIdx) {
   const idxSet = new Set();
   for (const [amk, a] of Object.entries(actuals)) {
     const startIdx = mkToIdx(amk);
     const covers = Math.max(1, Number(a.coversMonths) || 1);
-    for (let i = 0; i < covers; i++) idxSet.add(startIdx + i);
+    for (let i = 0; i < covers; i++) {
+      const idx = startIdx + i;
+      if (nowIdx == null || idx <= nowIdx) idxSet.add(idx);
+    }
   }
   return [...idxSet].sort((a, b) => a - b).map(idxToMk);
+}
+
+// Builds a map of absolute-monthIdx → amortized personal cash contribution
+// for every FUTURE month (strictly after nowIdx) that is covered by a
+// multi-month actual entry. Used by the forecast to honor pre-funded
+// contributions without changing its start month.
+function buildFuturePreFundedMap(actuals, nowIdx, sdYear, sdMonth0) {
+  // Returns an object keyed by "m" (month index relative to cfStartDate = sd)
+  const map = {};
+  const sdAbsIdx = sdYear * 12 + sdMonth0;
+  for (const [amk, a] of Object.entries(actuals)) {
+    if (a.personalCash == null) continue;
+    const covers = Math.max(1, Number(a.coversMonths) || 1);
+    if (covers <= 1) continue;
+    const startIdx = mkToIdx(amk);
+    const perMo = Number(a.personalCash) / covers;
+    for (let i = 0; i < covers; i++) {
+      const absIdx = startIdx + i;
+      if (nowIdx != null && absIdx <= nowIdx) continue; // past months handled by actuals loop
+      const relM = absIdx - sdAbsIdx;
+      map[relM] = (map[relM] || 0) + perMo;
+    }
+  }
+  return map;
 }
 
 // Is a given month key an explicit actual, or just covered by another entry?
@@ -469,7 +498,8 @@ function simulateFromState(p, initialState) {
   const { startMonth, startDate, desiredMonthlyWithdrawal, maxFlipSize,
     defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier,
     staleThreshold, maxMonths, currentAge, retirementAge, current401k, monthly401kContrib,
-    annual401kYield, monthlyPersonalCash, include401k, retirement401kStartDate, cfStartDate } = p;
+    annual401kYield, monthlyPersonalCash, include401k, retirement401kStartDate, cfStartDate,
+    preFundedMap } = p;
   // monthsToRetirement must be in absolute month index (from original cashflow start date)
   // m in step() is an absolute index where m=0 = cfStartDate
   let monthsToRetirement;
@@ -481,8 +511,18 @@ function simulateFromState(p, initialState) {
     monthsToRetirement = Math.max(0, (retirementAge - currentAge) * 12);
   }
 
+  // Effective personal cash for a given absolute-relative month index `m`.
+  // Pre-Freedom: baseline `monthlyPersonalCash` PLUS any pre-funded override
+  // for this month from a multi-month actual whose coverage window extends
+  // into the future. Post-Freedom: 0 (no more contributions).
+  function effectivePc(m, postFreedom) {
+    if (postFreedom) return 0;
+    if (preFundedMap && preFundedMap[m] != null) return preFundedMap[m];
+    return monthlyPersonalCash;
+  }
+
   function step(s, m, date, postFreedom) {
-    const pc = postFreedom ? 0 : monthlyPersonalCash;
+    const pc = effectivePc(m, postFreedom);
     const wd = postFreedom ? desiredMonthlyWithdrawal : 0;
     let deployed = false;
     if (s.loc <= 0) {
@@ -1935,10 +1975,16 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
   const { combinedRows, freedomDate, freedomMonth, cfDepletedDate } = useMemo(() => {
     const sd = parseDate(startDate);
     const dy = defaultYield / 100, lr = locInterestRate / 100, ay = annual401kYield / 100;
-    // Include both explicit actuals AND months covered by multi-month entries.
-    // A $6k/3-month entry in Jan will expand to Jan/Feb/Mar here so the LOC
-    // balance evolves correctly through the whole coverage window.
-    const actualMonthKeys = buildCoveredMonthKeys(actuals);
+    // The actuals loop processes explicit logged months AND past-covered months
+    // from multi-month entries (up to and including the current calendar month).
+    // Future-covered months are handled inside the forecast via `preFundedMap`,
+    // so that forecastStartMonth is always `lastActual.month + 1` regardless of
+    // how far a coverage window extends — avoiding discrete cliff effects in the
+    // flip-growth threshold logic (e.g. gap < staleThreshold).
+    const nowForCoverage = new Date();
+    const nowAbsIdx = nowForCoverage.getFullYear() * 12 + nowForCoverage.getMonth();
+    const actualMonthKeys = buildCoveredMonthKeys(actuals, nowAbsIdx);
+    const preFundedMap = buildFuturePreFundedMap(actuals, nowAbsIdx, sd.getFullYear(), sd.getMonth());
     const actualRows = [];
     let runningLOC = 0;
     let latest401kBal = current401k || 0; // carry-forward 401k from actuals
@@ -2010,7 +2056,7 @@ function App({ googleReady, signedIn, onSignIn, onSignOut }) {
       actualRows.push({ month: 0, date: sd, flipNumber: 1, personalCash: monthlyPersonalCash, assetCF: 0, locBalance: startingFlipAmount, currentFlipAmount: startingFlipAmount, balance401k: latest401kBal, retirement401kMonthly: 0, totalMonthlyCF: 0, monthlyWithdrawalOut: 0, activeFlipCount: 1, source: 'forecast' });
     }
 
-    const forecast = simulateFromState({ startMonth: forecastStartMonth, startDate: addMo(sd, forecastStartMonth), cfStartDate: sd, desiredMonthlyWithdrawal, maxFlipSize, defaultYield: dy, locInterestRate: lr, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, maxMonths: 600 - forecastStartMonth, currentAge, retirementAge, current401k: latest401kBal, monthly401kContrib, annual401kYield: ay, monthlyPersonalCash, include401k, retirement401kStartDate }, { ...initialState, activeFlips: [...initialState.activeFlips] });
+    const forecast = simulateFromState({ startMonth: forecastStartMonth, startDate: addMo(sd, forecastStartMonth), cfStartDate: sd, desiredMonthlyWithdrawal, maxFlipSize, defaultYield: dy, locInterestRate: lr, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, maxMonths: 600 - forecastStartMonth, currentAge, retirementAge, current401k: latest401kBal, monthly401kContrib, annual401kYield: ay, monthlyPersonalCash, include401k, retirement401kStartDate, preFundedMap }, { ...initialState, activeFlips: [...initialState.activeFlips] });
     const combined = [...actualRows, ...forecast.rows];
     return { combinedRows: combined, freedomDate: forecast.freedomDate || (lastActual && lastActual.assetCF >= desiredMonthlyWithdrawal ? lastActual.date : null), freedomMonth: forecast.freedomMonth, cfDepletedDate: forecast.cfDepletedDate };
   }, [startDate, monthlyPersonalCash, startingFlipAmount, desiredMonthlyWithdrawal, maxFlipSize, defaultYield, locInterestRate, flipDurationYears, flipsPerAmount, growthMultiplier, staleThreshold, currentAge, retirementAge, current401k, monthly401kContrib, annual401kYield, actuals, trackedFlips, include401k, retirement401kStartDate]);
